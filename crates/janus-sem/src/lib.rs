@@ -51,6 +51,8 @@ pub struct SemanticNode {
     pub geometry: Option<Geometry>,
     /// For links/areas: the raw `href` target (unresolved); else `None`.
     pub href: Option<String>,
+    /// State flags computed from the element (e.g. `disabled`, `checked`).
+    pub state: Vec<String>,
     /// Child semantic nodes (document order).
     pub children: Vec<SemanticNode>,
 }
@@ -79,6 +81,7 @@ pub fn build_snapshot(dom: &Dom, styles: &StyleMap, layout_root: &LayoutBox) -> 
         name: String::new(),
         geometry: None,
         href: None,
+        state: Vec::new(),
         children,
     }
 }
@@ -118,6 +121,11 @@ pub fn node_line(node: &SemanticNode) -> String {
     if let Some(href) = &node.href {
         s.push_str(" -> ");
         s.push_str(href);
+    }
+    for flag in &node.state {
+        s.push_str(" [");
+        s.push_str(flag);
+        s.push(']');
     }
     s
 }
@@ -163,7 +171,7 @@ fn build_nodes(
         return;
     }
 
-    let role = role_for(tag);
+    let role = role_of(dom, node, tag);
     let name = if is_named_role(role) {
         accessible_name(dom, node, tag)
     } else {
@@ -177,6 +185,7 @@ fn build_nodes(
     } else {
         None
     };
+    let state = compute_state(dom, node, role);
     // Inline elements have no box of their own; fall back to the union of
     // their descendants' boxes so links/spans still carry geometry.
     let geom = resolved_rect(dom, node, geometry).map(to_geometry);
@@ -193,8 +202,40 @@ fn build_nodes(
         name,
         geometry: geom,
         href,
+        state,
         children,
     });
+}
+
+/// Compute the ARIA-ish role, resolving `<input>` by its `type`.
+fn role_of(dom: &Dom, node: NodeId, tag: &str) -> &'static str {
+    if tag == "input" {
+        return match dom
+            .attr(node, "type")
+            .unwrap_or("text")
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "checkbox" => "checkbox",
+            "radio" => "radio",
+            "submit" | "button" | "reset" | "image" => "button",
+            "hidden" => "generic",
+            _ => "textbox",
+        };
+    }
+    role_for(tag)
+}
+
+/// State flags an agent cares about: `disabled`, and `checked` for toggles.
+fn compute_state(dom: &Dom, node: NodeId, role: &str) -> Vec<String> {
+    let mut state = Vec::new();
+    if dom.attr(node, "disabled").is_some() {
+        state.push("disabled".to_string());
+    }
+    if matches!(role, "checkbox" | "radio") && dom.attr(node, "checked").is_some() {
+        state.push("checked".to_string());
+    }
+    state
 }
 
 fn role_for(tag: &str) -> &'static str {
@@ -222,7 +263,16 @@ fn role_for(tag: &str) -> &'static str {
 fn is_named_role(role: &str) -> bool {
     matches!(
         role,
-        "link" | "button" | "heading" | "image" | "paragraph" | "listitem" | "textbox" | "combobox"
+        "link"
+            | "button"
+            | "heading"
+            | "image"
+            | "paragraph"
+            | "listitem"
+            | "textbox"
+            | "combobox"
+            | "checkbox"
+            | "radio"
     )
 }
 
@@ -342,6 +392,32 @@ mod tests {
             v.extend(flatten(c));
         }
         v
+    }
+
+    #[test]
+    fn form_controls_get_roles_and_state() {
+        let root = snapshot(
+            "<html><body>\
+             <input type=\"checkbox\" checked>\
+             <input type=\"submit\" value=\"Search\">\
+             <input type=\"text\" placeholder=\"Email\" disabled>\
+             </body></html>",
+            "",
+        );
+        let nodes = flatten(&root);
+        let checkbox = nodes
+            .iter()
+            .find(|n| n.role == "checkbox")
+            .expect("checkbox");
+        assert!(checkbox.state.contains(&"checked".to_string()));
+        let button = nodes
+            .iter()
+            .find(|n| n.role == "button")
+            .expect("submit button");
+        assert_eq!(button.name, "Search");
+        let textbox = nodes.iter().find(|n| n.role == "textbox").expect("textbox");
+        assert_eq!(textbox.name, "Email");
+        assert!(textbox.state.contains(&"disabled".to_string()));
     }
 
     #[test]
