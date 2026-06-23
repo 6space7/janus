@@ -179,7 +179,34 @@ fn apply_ua_defaults(style: &mut ComputedStyle, tag: &str) {
             style.font_size = 18.72;
             style.font_weight = 700;
         }
+        "h4" => style.font_weight = 700,
+        "h5" => {
+            style.font_size = 13.28;
+            style.font_weight = 700;
+        }
+        "h6" => {
+            style.font_size = 10.72;
+            style.font_weight = 700;
+        }
         "b" | "strong" => style.font_weight = 700,
+        "a" => style.color = Color::rgb(0, 0, 238), // default link blue
+        "ul" | "ol" => {
+            style.margin.top = Length::Em(1.0);
+            style.margin.bottom = Length::Em(1.0);
+            style.padding.left = Length::Px(40.0); // list indentation
+        }
+        "blockquote" => {
+            style.margin = Edges {
+                top: Length::Em(1.0),
+                right: Length::Px(40.0),
+                bottom: Length::Em(1.0),
+                left: Length::Px(40.0),
+            };
+        }
+        "pre" => {
+            style.margin.top = Length::Em(1.0);
+            style.margin.bottom = Length::Em(1.0);
+        }
         _ => {}
     }
 }
@@ -460,5 +487,16 @@ mod tests {
         let dom = janus_html::parse("<html><head><title>T</title></head><body>x</body></html>");
         let map = compute_styles(&dom, &Stylesheet::default());
         assert_eq!(map[&find(&dom, "head")].display, Display::None);
+    }
+
+    #[test]
+    fn ua_defaults_for_links_and_lists() {
+        let dom =
+            janus_html::parse("<html><body><a href=\"/\">x</a><ul><li>y</li></ul></body></html>");
+        let map = compute_styles(&dom, &Stylesheet::default());
+        // Links default to blue; an author rule can still override.
+        assert_eq!(map[&find(&dom, "a")].color, Color::rgb(0, 0, 238));
+        // Lists are indented via padding-left.
+        assert_eq!(map[&find(&dom, "ul")].padding.left, Length::Px(40.0));
     }
 }
