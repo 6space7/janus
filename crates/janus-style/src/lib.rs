@@ -19,7 +19,7 @@ pub use values::{
 
 use std::collections::HashMap;
 
-use janus_css::{Declaration, Selector, SimpleSelector, Specificity, Stylesheet};
+use janus_css::{AttrOp, Declaration, Selector, SimpleSelector, Specificity, Stylesheet};
 use janus_dom::{Dom, NodeId};
 
 /// Computed values for the curated P0 property set.
@@ -409,7 +409,25 @@ fn compound_matches(dom: &Dom, node: NodeId, compound: &SimpleSelector) -> bool 
             }
         }
     }
+    for attr in &compound.attrs {
+        if !attribute_matches(dom, node, attr) {
+            return false;
+        }
+    }
     true
+}
+
+fn attribute_matches(dom: &Dom, node: NodeId, attr: &janus_css::AttrSelector) -> bool {
+    let actual = dom.attr(node, &attr.name);
+    match (&attr.op, attr.value.as_deref()) {
+        (AttrOp::Exists, _) => actual.is_some(),
+        (AttrOp::Equals, Some(v)) => actual == Some(v),
+        (AttrOp::Substring, Some(v)) => actual.is_some_and(|a| a.contains(v)),
+        (AttrOp::Prefix, Some(v)) => actual.is_some_and(|a| a.starts_with(v)),
+        (AttrOp::Suffix, Some(v)) => actual.is_some_and(|a| a.ends_with(v)),
+        (AttrOp::Includes, Some(v)) => actual.is_some_and(|a| a.split_whitespace().any(|t| t == v)),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -487,6 +505,20 @@ mod tests {
         let dom = janus_html::parse("<html><head><title>T</title></head><body>x</body></html>");
         let map = compute_styles(&dom, &Stylesheet::default());
         assert_eq!(map[&find(&dom, "head")].display, Display::None);
+    }
+
+    #[test]
+    fn attribute_selector_matches() {
+        let dom = janus_html::parse(
+            "<html><body><input type=\"text\"><input type=\"submit\"></body></html>",
+        );
+        let sheet = Stylesheet::parse("input[type=submit] { color: red; }");
+        let map = compute_styles(&dom, &sheet);
+        let reds = map
+            .values()
+            .filter(|s| s.color == Color::rgb(255, 0, 0))
+            .count();
+        assert_eq!(reds, 1);
     }
 
     #[test]

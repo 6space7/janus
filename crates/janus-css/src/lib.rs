@@ -33,6 +33,36 @@ pub struct SimpleSelector {
     pub id: Option<String>,
     /// The `.class` names.
     pub classes: Vec<String>,
+    /// Attribute selectors like `[type="text"]`.
+    pub attrs: Vec<AttrSelector>,
+}
+
+/// The match operator of an attribute selector.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum AttrOp {
+    /// `[attr]` — the attribute is present.
+    Exists,
+    /// `[attr=v]` — exact match.
+    Equals,
+    /// `[attr~=v]` — whitespace-separated list contains `v`.
+    Includes,
+    /// `[attr^=v]` — value starts with `v`.
+    Prefix,
+    /// `[attr$=v]` — value ends with `v`.
+    Suffix,
+    /// `[attr*=v]` — value contains `v`.
+    Substring,
+}
+
+/// An attribute selector, e.g. `[type="text"]` or `[disabled]`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct AttrSelector {
+    /// Attribute name (ASCII-lowercased).
+    pub name: String,
+    /// The match operator.
+    pub op: AttrOp,
+    /// The comparison value (`None` only for [`AttrOp::Exists`]).
+    pub value: Option<String>,
 }
 
 /// A full selector: a descendant chain of compounds, subject last.
@@ -53,6 +83,7 @@ impl Selector {
                 s.a += 1;
             }
             s.b += u32::try_from(compound.classes.len()).unwrap_or(u32::MAX);
+            s.b += u32::try_from(compound.attrs.len()).unwrap_or(u32::MAX);
             if compound.tag.is_some() {
                 s.c += 1;
             }
@@ -268,15 +299,104 @@ fn parse_compound(part: &str) -> Option<SimpleSelector> {
                 }
                 selector.id = Some(name);
             }
+            '[' => {
+                let attr = parse_attr(&chars, &mut i)?;
+                selector.attrs.push(attr);
+            }
             c if is_ident_start(c) => {
                 let name = read_ident(&chars, &mut i);
                 selector.tag = Some(name.to_ascii_lowercase());
             }
-            // Attribute/pseudo selectors are unsupported: drop the whole selector.
+            // Pseudo selectors and the like are unsupported: drop the selector.
             _ => return None,
         }
     }
     Some(selector)
+}
+
+/// Parse a `[…]` attribute selector starting at `chars[*i] == '['`.
+fn parse_attr(chars: &[char], i: &mut usize) -> Option<AttrSelector> {
+    *i += 1; // past '['
+    skip_ws(chars, i);
+    let name = read_ident(chars, i).to_ascii_lowercase();
+    if name.is_empty() {
+        return None;
+    }
+    skip_ws(chars, i);
+    let op = match chars.get(*i) {
+        Some(']') => {
+            *i += 1;
+            return Some(AttrSelector {
+                name,
+                op: AttrOp::Exists,
+                value: None,
+            });
+        }
+        Some('=') => {
+            *i += 1;
+            AttrOp::Equals
+        }
+        Some('~') if chars.get(*i + 1) == Some(&'=') => {
+            *i += 2;
+            AttrOp::Includes
+        }
+        Some('^') if chars.get(*i + 1) == Some(&'=') => {
+            *i += 2;
+            AttrOp::Prefix
+        }
+        Some('$') if chars.get(*i + 1) == Some(&'=') => {
+            *i += 2;
+            AttrOp::Suffix
+        }
+        Some('*') if chars.get(*i + 1) == Some(&'=') => {
+            *i += 2;
+            AttrOp::Substring
+        }
+        _ => return None,
+    };
+    skip_ws(chars, i);
+    let value = read_attr_value(chars, i);
+    skip_ws(chars, i);
+    if chars.get(*i) == Some(&']') {
+        *i += 1;
+        Some(AttrSelector {
+            name,
+            op,
+            value: Some(value),
+        })
+    } else {
+        None
+    }
+}
+
+fn read_attr_value(chars: &[char], i: &mut usize) -> String {
+    match chars.get(*i).copied() {
+        Some(quote) if quote == '"' || quote == '\'' => {
+            *i += 1;
+            let start = *i;
+            while *i < chars.len() && chars[*i] != quote {
+                *i += 1;
+            }
+            let value: String = chars[start..*i].iter().collect();
+            if chars.get(*i) == Some(&quote) {
+                *i += 1;
+            }
+            value
+        }
+        _ => {
+            let start = *i;
+            while *i < chars.len() && !chars[*i].is_ascii_whitespace() && chars[*i] != ']' {
+                *i += 1;
+            }
+            chars[start..*i].iter().collect()
+        }
+    }
+}
+
+fn skip_ws(chars: &[char], i: &mut usize) {
+    while *i < chars.len() && chars[*i].is_ascii_whitespace() {
+        *i += 1;
+    }
 }
 
 fn read_ident(chars: &[char], i: &mut usize) -> String {
@@ -374,6 +494,35 @@ mod tests {
         assert_eq!(s.compounds.len(), 2);
         assert_eq!(s.compounds[0].tag.as_deref(), Some("ul"));
         assert_eq!(s.subject().tag.as_deref(), Some("li"));
+    }
+
+    #[test]
+    fn attribute_selectors_parse() {
+        let s = &Stylesheet::parse("input[type=\"text\"][disabled] { a: b }").rules[0].selectors[0];
+        let subject = s.subject();
+        assert_eq!(subject.tag.as_deref(), Some("input"));
+        assert_eq!(subject.attrs.len(), 2);
+        assert_eq!(
+            subject.attrs[0],
+            AttrSelector {
+                name: "type".into(),
+                op: AttrOp::Equals,
+                value: Some("text".into())
+            }
+        );
+        assert_eq!(
+            subject.attrs[1],
+            AttrSelector {
+                name: "disabled".into(),
+                op: AttrOp::Exists,
+                value: None
+            }
+        );
+        // Each attr selector adds class-level specificity.
+        assert_eq!(s.specificity(), Specificity { a: 0, b: 2, c: 1 });
+
+        let sub = &Stylesheet::parse("a[href*=\"github\"]{a:b}").rules[0].selectors[0];
+        assert_eq!(sub.subject().attrs[0].op, AttrOp::Substring);
     }
 
     #[test]
