@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [master, rust-llm-browser-engine]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: fmt · clippy · build · test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy (warnings = errors)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Build
+        run: cargo build --workspace --all-targets
+      - name: Test
+        run: cargo test --workspace
+
+  bench-smoke:
+    name: perf harness (benches must build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Compile benchmarks
+        run: cargo bench --workspace --no-run
+      # PERF-BUDGET GATE (TODO, P0): run the benches and fail the build on
+      # regression past budget vs a committed baseline (criterion compare or
+      # iai-callgrind for instruction-count stability in CI). The plan makes
+      # this a hard gate; today CI guarantees the perf harness compiles.

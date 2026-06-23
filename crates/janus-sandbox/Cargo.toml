@@ -1,0 +1,12 @@
+[package]
+name = "janus-sandbox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Multi-process isolation and OS sandbox policy (seccomp/namespaces/job objects)."
+
+[lints]
+workspace = true
+
+[dependencies]

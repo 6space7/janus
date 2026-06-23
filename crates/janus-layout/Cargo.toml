@@ -1,0 +1,18 @@
+[package]
+name = "janus-layout"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Box tree to fragment tree: block/inline/flex/grid, floats, positioning, stacking contexts and z-index."
+
+[lints]
+workspace = true
+
+[dependencies]
+janus-dom.workspace = true
+janus-style.workspace = true
+
+[dev-dependencies]
+janus-html.workspace = true
+janus-css.workspace = true

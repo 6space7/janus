@@ -1,0 +1,13 @@
+[package]
+name = "janus-html"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The WHATWG HTML tokenizer (~80 states) and tree builder (~23 insertion modes, adoption agency)."
+
+[lints]
+workspace = true
+
+[dependencies]
+janus-dom.workspace = true

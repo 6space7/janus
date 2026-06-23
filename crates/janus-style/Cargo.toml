@@ -1,0 +1,17 @@
+[package]
+name = "janus-style"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Selector matching, specificity, the cascade, and incremental style invalidation."
+
+[lints]
+workspace = true
+
+[dependencies]
+janus-dom.workspace = true
+janus-css.workspace = true
+
+[dev-dependencies]
+janus-html.workspace = true

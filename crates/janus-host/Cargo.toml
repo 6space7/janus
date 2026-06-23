@@ -1,0 +1,20 @@
+[package]
+name = "janus-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The process orchestrator wiring the host and renderer pipeline together."
+
+[lints]
+workspace = true
+
+[dependencies]
+janus-bytes.workspace = true
+janus-net.workspace = true
+janus-dom.workspace = true
+janus-html.workspace = true
+janus-css.workspace = true
+janus-style.workspace = true
+janus-layout.workspace = true
+janus-sem.workspace = true

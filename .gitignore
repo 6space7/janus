@@ -1,0 +1,5 @@
+/target
+**/*.rs.bk
+.DS_Store
+# Cargo.lock IS committed: Loom builds applications (loom-cli, loom-shell), so a
+# locked, reproducible dependency graph is intended.

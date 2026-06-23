@@ -1,0 +1,12 @@
+[package]
+name = "janus-traits"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Cross-layer trait seams that isolate Janus from fast-moving external backends."
+
+[lints]
+workspace = true
+
+[dependencies]

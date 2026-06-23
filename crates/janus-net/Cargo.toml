@@ -1,0 +1,15 @@
+[package]
+name = "janus-net"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "HTTP/1.1+2 client state machines, cookie jar, cache, CSP, mixed-content, and same-origin policy (TLS records via rustls)."
+
+[lints]
+workspace = true
+
+[dependencies]
+janus-bytes.workspace = true
+rustls.workspace = true
+webpki-roots.workspace = true

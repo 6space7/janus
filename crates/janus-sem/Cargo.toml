@@ -1,0 +1,19 @@
+[package]
+name = "janus-sem"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The Semantic Surface — engine-computed affordances, stable SemanticIds, and visibility/provenance tagging."
+
+[lints]
+workspace = true
+
+[dependencies]
+janus-dom.workspace = true
+janus-style.workspace = true
+janus-layout.workspace = true
+
+[dev-dependencies]
+janus-html.workspace = true
+janus-css.workspace = true

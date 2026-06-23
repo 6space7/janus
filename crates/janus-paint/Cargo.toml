@@ -1,0 +1,20 @@
+[package]
+name = "janus-paint"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Display-list format, the paint stage, and the rasterizer-backend seam (retained-mode, layerized, damage-tracked)."
+
+[lints]
+workspace = true
+
+[dependencies]
+janus-layout.workspace = true
+janus-style.workspace = true
+janus-traits.workspace = true
+tiny-skia.workspace = true
+
+[dev-dependencies]
+janus-html.workspace = true
+janus-css.workspace = true

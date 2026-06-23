@@ -1,0 +1,12 @@
+[package]
+name = "janus-js"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "JavaScript host: V8 (rusty_v8) integration, the GC-rooting bridge, and WebIDL-codegen DOM bindings."
+
+[lints]
+workspace = true
+
+[dependencies]

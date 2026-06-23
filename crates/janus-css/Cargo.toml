@@ -1,0 +1,12 @@
+[package]
+name = "janus-css"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "CSS tokenizer, stylesheet/rule model, and the computed/used value pipeline."
+
+[lints]
+workspace = true
+
+[dependencies]

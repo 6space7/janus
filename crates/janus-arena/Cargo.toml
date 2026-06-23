@@ -1,0 +1,19 @@
+[package]
+name = "janus-arena"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Generational arena for Janus's hot trees — cache-friendly, pointer-chase-free node storage."
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "arena"
+harness = false

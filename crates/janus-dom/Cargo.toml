@@ -1,0 +1,14 @@
+[package]
+name = "janus-dom"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The arena-backed DOM node store that parsing fills, style annotates, and layout consumes."
+
+[lints]
+workspace = true
+
+[dependencies]
+janus-arena.workspace = true
+janus-atom.workspace = true

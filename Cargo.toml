@@ -1,0 +1,89 @@
+# Janus — a from-scratch, speed-first, LLM-first (and human) browser engine.
+#
+# This is a virtual workspace manifest. Each layer of the engine is its own
+# crate under `crates/`. See README.md and the project plan for the
+# architecture and the "from-scratch boundary" (what we build vs the reused
+# primitives floor).
+
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.96"
+license = "MIT OR Apache-2.0"
+authors = ["Janus contributors"]
+description = "Janus — a from-scratch, speed-first, LLM-first (and human) browser engine in Rust"
+
+[workspace.dependencies]
+# --- internal crates (path deps; version inherited from the workspace) ---
+janus-atom = { path = "crates/janus-atom" }
+janus-arena = { path = "crates/janus-arena" }
+janus-traits = { path = "crates/janus-traits" }
+janus-dom = { path = "crates/janus-dom" }
+janus-bytes = { path = "crates/janus-bytes" }
+janus-net = { path = "crates/janus-net" }
+janus-html = { path = "crates/janus-html" }
+janus-css = { path = "crates/janus-css" }
+janus-style = { path = "crates/janus-style" }
+janus-layout = { path = "crates/janus-layout" }
+janus-text = { path = "crates/janus-text" }
+janus-paint = { path = "crates/janus-paint" }
+janus-sem = { path = "crates/janus-sem" }
+janus-host = { path = "crates/janus-host" }
+
+# --- in use today ---
+rustc-hash = "2"
+tiny-skia = "0.11"
+# TLS records via rustls with the `ring` provider (no cmake/aws-lc dependency).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "0.26"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Drop plotters/HTML reports (faster builds, fewer deps) but keep
+# `cargo_bench_support` so `cargo bench` runs the harness; gate in CI.
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+# --- primitives floor (version catalog / single source of truth) ---
+# These are the crates the plan's boundary table marks REUSE. They are listed
+# here so versions live in one place; declaring them does NOT download them —
+# each is wired into its crate as that layer is implemented.
+#   rustls       = "0.23"   # TLS records (janus-net)
+#   hyper        = "1"      # HTTP/1.1+2 plumbing reference (janus-net)
+#   encoding_rs  = "0.8"    # charset decode tables (janus-bytes/janus-html)
+#   tokio        = "1"      # async runtime (janus-net/janus-host)
+#   rayon        = "1"      # data-parallelism (janus-style/janus-layout/janus-paint)
+#   skrifa       = "0.x"    # font parsing (janus-text)
+#   rustybuzz    = "0.x"    # shaping (janus-text)
+#   swash        = "0.x"    # glyph rasterization (janus-text)
+#   image        = "0.25"   # image codecs (janus-paint)
+#   tiny-skia    = "0.11"   # CPU rasterizer backend (janus-paint)
+#   wgpu         = "0.x"    # GPU abstraction, later (janus-paint)
+#   winit        = "0.30"   # OS windowing (janus-shell)
+#   accesskit    = "0.x"    # OS accessibility graft (janus-shell)
+#   v8 / rusty_v8 = "0.x"   # JS VM (janus-js)
+
+[workspace.lints.rust]
+# Unsafe is opt-in and must be justified: a crate that genuinely needs it
+# overrides this with `#![allow(unsafe_code)]` and a comment.
+unsafe_code = "deny"
+unreachable_pub = "warn"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+
+# Optimize release builds aggressively (speed is a founding goal).
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+# Benchmarks need real optimization but also debuginfo for profilers.
+[profile.bench]
+opt-level = 3
+lto = "thin"
+debug = true
