@@ -22,10 +22,12 @@ use serde_json::{json, Value};
 
 const DEFAULT_WIDTH: f32 = 800.0;
 
-/// A browsing session: at most one loaded page, driven by the MCP tools.
+/// A browsing session: at most one loaded page plus a cookie jar that persists
+/// across navigations, driven by the MCP tools.
 #[derive(Debug, Default)]
 pub struct Session {
     page: Option<janus_host::Page>,
+    jar: janus_host::CookieJar,
 }
 
 impl Session {
@@ -51,7 +53,7 @@ impl Session {
     /// # Errors
     /// On a network/parse failure or an unrenderable document.
     pub fn load_url(&mut self, url: &str, width: f32) -> Result<String, String> {
-        let page = janus_host::render_url(url, width)?;
+        let page = janus_host::render_url_with_jar(url, width, &mut self.jar)?;
         let snapshot = page.snapshot();
         self.page = Some(page);
         Ok(snapshot)

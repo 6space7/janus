@@ -15,6 +15,8 @@ use janus_dom::{Dom, NodeData, NodeId};
 use janus_layout::LayoutBox;
 use janus_style::{Display, StyleMap};
 
+pub use janus_net::CookieJar;
+
 /// A fully processed page: one layout pass, ready for either painter.
 #[derive(Debug)]
 pub struct Page {
@@ -129,6 +131,18 @@ pub fn render_html(html: &str, base_url: Option<Url>, width: f32) -> Option<Page
 /// On a network/parse failure or an unrenderable document.
 pub fn render_url(url: &str, width: f32) -> Result<Page, String> {
     let response = janus_net::fetch_url(url).map_err(|e| e.to_string())?;
+    let base = response.final_url.clone();
+    render_html(&response.text(), Some(base), width).ok_or_else(|| "nothing to render".to_string())
+}
+
+/// Like [`render_url`] but sends/stores cookies in `jar`, so a session's
+/// cookies persist across navigations.
+///
+/// # Errors
+/// On a network/parse failure or an unrenderable document.
+pub fn render_url_with_jar(url: &str, width: f32, jar: &mut CookieJar) -> Result<Page, String> {
+    let parsed = Url::parse(url).map_err(|e| e.to_string())?;
+    let response = janus_net::fetch_with_jar(&parsed, jar).map_err(|e| e.to_string())?;
     let base = response.final_url.clone();
     render_html(&response.text(), Some(base), width).ok_or_else(|| "nothing to render".to_string())
 }
