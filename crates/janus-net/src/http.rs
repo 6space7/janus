@@ -9,20 +9,24 @@ pub(crate) struct ParsedResponse {
 }
 
 /// Build a `Connection: close` HTTP/1.1 GET request for `host` and
-/// `path_and_query`. We close the connection so the body runs to EOF, and ask
-/// for `identity` encoding since we do not decompress yet.
-pub(crate) fn build_request(host: &str, path_and_query: &str) -> String {
-    format!(
-        "GET {path} HTTP/1.1\r\n\
+/// `path_and_query`, with an optional `Cookie` header. We close the connection
+/// so the body runs to EOF, and ask for `identity` encoding (no decompress yet).
+pub(crate) fn build_request(host: &str, path_and_query: &str, cookie: Option<&str>) -> String {
+    let mut request = format!(
+        "GET {path_and_query} HTTP/1.1\r\n\
          Host: {host}\r\n\
          User-Agent: janus/0.0 (+https://example.invalid/janus)\r\n\
          Accept: text/html,application/xhtml+xml,*/*\r\n\
          Accept-Encoding: identity\r\n\
-         Connection: close\r\n\
-         \r\n",
-        path = path_and_query,
-        host = host,
-    )
+         Connection: close\r\n"
+    );
+    if let Some(cookie) = cookie {
+        request.push_str("Cookie: ");
+        request.push_str(cookie);
+        request.push_str("\r\n");
+    }
+    request.push_str("\r\n");
+    request
 }
 
 /// Parse a complete raw HTTP/1.1 response. Dechunks a `chunked` body.
@@ -107,10 +111,18 @@ mod tests {
 
     #[test]
     fn request_has_host_and_close() {
-        let req = build_request("example.com", "/path?q=1");
+        let req = build_request("example.com", "/path?q=1", None);
         assert!(req.starts_with("GET /path?q=1 HTTP/1.1\r\n"));
         assert!(req.contains("Host: example.com\r\n"));
         assert!(req.contains("Connection: close\r\n"));
+        assert!(!req.contains("Cookie:"));
+        assert!(req.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn request_includes_cookie_header_when_present() {
+        let req = build_request("example.com", "/", Some("sid=abc; theme=dark"));
+        assert!(req.contains("Cookie: sid=abc; theme=dark\r\n"));
         assert!(req.ends_with("\r\n\r\n"));
     }
 

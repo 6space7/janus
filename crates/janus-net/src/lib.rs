@@ -9,6 +9,7 @@
 //! following, and `chunked` decoding. Cookies, caching, HTTP/2, keep-alive,
 //! content decompression, and charset sniffing layer on next.
 
+mod cookie;
 mod http;
 
 use std::io::{ErrorKind, Read, Write};
@@ -16,6 +17,8 @@ use std::net::TcpStream;
 use std::sync::Arc;
 
 use janus_bytes::Url;
+
+pub use cookie::{Cookie, CookieJar};
 
 use crate::http::{build_request, header, parse_response};
 
@@ -101,10 +104,32 @@ pub fn fetch_url(url: &str) -> Result<Response, NetError> {
 /// # Errors
 /// See [`NetError`].
 pub fn fetch(url: &Url) -> Result<Response, NetError> {
+    fetch_inner(url, None)
+}
+
+/// Fetch `url` using `jar`: cookies are sent with each request and any
+/// `Set-Cookie` responses (including across redirects) are stored back.
+///
+/// # Errors
+/// See [`NetError`].
+pub fn fetch_with_jar(url: &Url, jar: &mut CookieJar) -> Result<Response, NetError> {
+    fetch_inner(url, Some(jar))
+}
+
+fn fetch_inner(url: &Url, mut jar: Option<&mut CookieJar>) -> Result<Response, NetError> {
     let mut current = url.clone();
     for _ in 0..MAX_REDIRECTS {
-        let raw = fetch_once(&current)?;
+        let cookie = jar.as_deref().and_then(|j| j.header_for(&current));
+        let raw = fetch_once(&current, cookie.as_deref())?;
         let parsed = parse_response(&raw).map_err(NetError::Parse)?;
+
+        if let Some(j) = jar.as_deref_mut() {
+            for (name, value) in &parsed.headers {
+                if name.eq_ignore_ascii_case("set-cookie") {
+                    j.set_from_header(value, &current);
+                }
+            }
+        }
 
         if (300..400).contains(&parsed.status) && parsed.status != 304 {
             if let Some(location) = header(&parsed.headers, "location") {
@@ -122,7 +147,7 @@ pub fn fetch(url: &Url) -> Result<Response, NetError> {
     Err(NetError::TooManyRedirects)
 }
 
-fn fetch_once(url: &Url) -> Result<Vec<u8>, NetError> {
+fn fetch_once(url: &Url, cookie: Option<&str>) -> Result<Vec<u8>, NetError> {
     let host = url.host().ok_or(NetError::BadUrl)?;
     let port = url.port_or_default().ok_or(NetError::UnsupportedScheme)?;
 
@@ -134,7 +159,7 @@ fn fetch_once(url: &Url) -> Result<Vec<u8>, NetError> {
         target.push('?');
         target.push_str(query);
     }
-    let request = build_request(host, &target);
+    let request = build_request(host, &target, cookie);
 
     match url.scheme() {
         "https" => fetch_tls(host, port, request.as_bytes()),
