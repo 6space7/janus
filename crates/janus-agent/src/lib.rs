@@ -7,12 +7,17 @@
 //! - `navigate { url | html, width? }` — load a page, return its semantic snapshot
 //! - `snapshot` — the ref-tagged, box-grounded Semantic Surface of the page
 //! - `extract_text` — the visible text (hidden/`display:none` content excluded)
+//! - `click { ref }` — follow the link at a ref and return the new snapshot
+//! - `find { role?, name_contains? }` — query the surface for matching nodes
+//! - `screenshot` — render the page to a base64 PNG (image content)
 //!
 //! The request handler is pure and offline-unit-tested; [`serve_stdio`] runs the
 //! newline-delimited JSON-RPC loop for the `janus-mcp` binary. The TOCTOU-safe
 //! `act` tool (with nonce-bound stable-id revalidation) and semantic diff
 //! streaming are the next additions.
 
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use serde_json::{json, Value};
 
 const DEFAULT_WIDTH: f32 = 800.0;
@@ -93,6 +98,16 @@ impl Session {
             .as_ref()
             .ok_or("no page loaded")?
             .find(role, name_contains))
+    }
+
+    /// Render the current page to a PNG and return it base64-encoded.
+    ///
+    /// # Errors
+    /// If no page is loaded or rasterization fails.
+    pub fn screenshot(&self) -> Result<String, String> {
+        let page = self.page.as_ref().ok_or("no page loaded")?;
+        let png = janus_paint::paint_png(&page.layout).ok_or("failed to rasterize")?;
+        Ok(STANDARD.encode(png))
     }
 }
 
@@ -178,6 +193,20 @@ fn call_tool(session: &mut Session, id: Option<Value>, params: Option<&Value>) -
         .and_then(Value::as_f64)
         .map_or(DEFAULT_WIDTH, |w| w as f32);
 
+    // screenshot returns image content rather than text.
+    if name == "screenshot" {
+        return match session.screenshot() {
+            Ok(data) => ok(
+                id,
+                json!({
+                    "content": [ { "type": "image", "data": data, "mimeType": "image/png" } ],
+                    "isError": false
+                }),
+            ),
+            Err(e) => ok(id, tool_content(&e, true)),
+        };
+    }
+
     let outcome: Result<String, String> = match name {
         "navigate" => {
             if let Some(url) = args.get("url").and_then(Value::as_str) {
@@ -255,6 +284,11 @@ fn tool_specs() -> Value {
                     "name_contains": { "type": "string", "description": "case-insensitive name substring" }
                 }
             }
+        },
+        {
+            "name": "screenshot",
+            "description": "Render the current page to a PNG and return it as a base64 image.",
+            "inputSchema": { "type": "object", "properties": {} }
         }
     ])
 }
@@ -321,6 +355,22 @@ mod tests {
         assert_eq!(resp["result"]["isError"], false);
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("heading \"Hi\" [ref=e1]"), "{text}");
+    }
+
+    #[test]
+    fn screenshot_returns_png_image() {
+        let mut s = Session::new();
+        call(
+            &mut s,
+            "navigate",
+            json!({ "html": "<html><body><h1>Hi</h1></body></html>" }),
+        );
+        let resp = call(&mut s, "screenshot", json!({}));
+        assert_eq!(resp["result"]["content"][0]["type"], "image");
+        assert_eq!(resp["result"]["content"][0]["mimeType"], "image/png");
+        let b64 = resp["result"]["content"][0]["data"].as_str().unwrap();
+        let bytes = STANDARD.decode(b64).unwrap();
+        assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']));
     }
 
     #[test]

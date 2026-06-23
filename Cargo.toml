@@ -42,6 +42,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 webpki-roots = "0.26"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+base64 = "0.22"
 # Drop plotters/HTML reports (faster builds, fewer deps) but keep
 # `cargo_bench_support` so `cargo bench` runs the harness; gate in CI.
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
