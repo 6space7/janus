@@ -17,9 +17,10 @@ streaming**.
 > stack, parses the HTML and CSS from scratch, runs the cascade and layout, and emits
 > **both** a PNG (human view) and a ref-tagged, box-grounded semantic snapshot (agent
 > view) from one layout pass. An MCP server (`janus-mcp`) exposes `navigate` / `snapshot`
-> / `extract_text` / `click` so an LLM can drive it. Still to come: real glyph rendering
-> (`janus-text`), JS (`janus-js` / V8), sandboxing (`janus-sandbox`), and the windowed shell
-> (`janus-shell`). See the project plan for the full roadmap.
+> / `extract_text` / `click` / `find` / `screenshot` so an LLM can drive it. The human PNG
+> renders real glyphs (system fonts via cosmic-text). Still to come: JS (`janus-js` / V8),
+> sandboxing (`janus-sandbox`), and the windowed shell (`janus-shell`). See the project
+> plan for the full roadmap.
 
 Try it:
 
@@ -68,12 +69,12 @@ Status legend: ✅ working · 🟡 partial · ⬜ stub.
 | `janus-css` | CSS parser → selectors, specificity, declarations | 🟡 |
 | `janus-style` | Selector matching, the cascade, inheritance → computed styles | 🟡 |
 | `janus-layout` | Block + inline layout → positioned box tree (geometry) | 🟡 |
-| `janus-paint` | Display list + `tiny-skia` → PNG (text as placeholder bars) | 🟡 |
+| `janus-paint` | Display list + `tiny-skia` → PNG, with real glyphs via `janus-text` | 🟡 |
 | `janus-sem` | The Semantic Surface: roles, names, geometry, stable IDs, href | 🟡 |
 | `janus-host` | Pipeline orchestrator: `render_html`/`render_url` + external CSS | ✅ |
 | `janus-agent` | MCP server (`navigate`/`snapshot`/`extract_text`/`click`) | 🟡 |
 | `janus-cli` | `janus-shot`: URL/HTML → PNG + semantic snapshot | ✅ |
-| `janus-text` | Real shaping/glyphs (rustybuzz/swash) | ⬜ |
+| `janus-text` | Real text: system fonts + shaping + glyph raster (cosmic-text) | 🟡 |
 | `janus-js` | V8 host: rooting bridge + WebIDL DOM bindings | ⬜ |
 | `janus-sandbox` | Multi-process isolation + OS sandbox policy | ⬜ |
 | `janus-shell` | Human shell: window, engine-drawn chrome, AccessKit graft | ⬜ |

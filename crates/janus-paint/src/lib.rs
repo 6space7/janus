@@ -103,8 +103,9 @@ pub fn canvas_size(root: &LayoutBox) -> PixelSize {
 pub fn render(items: &[DisplayItem], size: PixelSize) -> Option<Pixmap> {
     let mut pixmap = Pixmap::new(size.width.max(1), size.height.max(1))?;
     pixmap.fill(tiny_skia::Color::WHITE);
+    let mut text = janus_text::TextContext::new();
     for item in items {
-        paint_item(&mut pixmap, item);
+        paint_item(&mut pixmap, item, &mut text);
     }
     Some(pixmap)
 }
@@ -121,7 +122,7 @@ pub fn paint_png(root: &LayoutBox) -> Option<Vec<u8>> {
     paint(root)?.encode_png().ok()
 }
 
-fn paint_item(pixmap: &mut Pixmap, item: &DisplayItem) {
+fn paint_item(pixmap: &mut Pixmap, item: &DisplayItem, text: &mut janus_text::TextContext) {
     match item {
         DisplayItem::Rect { rect, color } => fill_rect(pixmap, *rect, *color),
         DisplayItem::Border {
@@ -167,22 +168,18 @@ fn paint_item(pixmap: &mut Pixmap, item: &DisplayItem) {
         }
         DisplayItem::Text {
             rect,
-            text,
+            text: run,
             color,
             font_size,
         } => {
-            if text.trim().is_empty() {
-                return;
-            }
-            // Placeholder ink bar, vertically centered in the line box.
-            let bar_height = font_size * 0.6;
-            let bar = Rect {
-                x: rect.x,
-                y: rect.y + (rect.height - bar_height) * 0.5,
-                width: rect.width,
-                height: bar_height,
-            };
-            fill_rect(pixmap, bar, *color);
+            text.draw_run(
+                pixmap,
+                rect.x,
+                rect.y,
+                run,
+                *font_size,
+                (color.r, color.g, color.b, color.a),
+            );
         }
     }
 }

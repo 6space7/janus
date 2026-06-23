@@ -10,3 +10,5 @@ description = "Inline and line-box layout: line breaking, BiDi reordering, and s
 workspace = true
 
 [dependencies]
+cosmic-text.workspace = true
+tiny-skia.workspace = true
