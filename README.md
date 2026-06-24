@@ -68,7 +68,7 @@ Status legend: ✅ working · 🟡 partial · ⬜ stub.
 | `janus-dom` | Arena-backed DOM node store | ✅ |
 | `janus-css` | CSS parser → selectors, specificity, declarations | 🟡 |
 | `janus-style` | Selector matching, the cascade, inheritance → computed styles | 🟡 |
-| `janus-layout` | Block + inline layout → positioned box tree (geometry) | 🟡 |
+| `janus-layout` | Block + inline + row flexbox → positioned box tree (geometry) | 🟡 |
 | `janus-paint` | Display list + `tiny-skia` → PNG, with real glyphs via `janus-text` | 🟡 |
 | `janus-sem` | The Semantic Surface: roles, names, geometry, stable IDs, href | 🟡 |
 | `janus-host` | Pipeline orchestrator: `render_html`/`render_url` + external CSS | ✅ |

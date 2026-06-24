@@ -7,13 +7,16 @@
 //! boxes that wrap at the container edge. Mixed block/inline children are
 //! handled by wrapping inline runs in anonymous block boxes.
 //!
-//! Text is measured with a simple metric (`0.5em` advance, `1.2em` line
-//! height) as a stand-in until `janus-text` brings real shaping (rustybuzz /
-//! swash). Floats, flex, grid, positioning, and stacking contexts are the next
-//! layer; the box/fragment split and the geometry contract are established here.
+//! Single-line row flexbox (`display:flex`) is supported: main-axis sizing from
+//! `width` + `flex-grow`, `justify-content`, and `align-items`. Text is measured
+//! with a simple metric (`0.5em` advance, `1.2em` line height) as a stand-in
+//! until layout consumes `janus-text`'s real metrics. Floats, grid, multi-line
+//! flex/shrink, positioning, and stacking contexts are the next layer.
 
 use janus_dom::{Dom, NodeData, NodeId};
-use janus_style::{Color, ComputedStyle, Display, Edges, Length, StyleMap};
+use janus_style::{
+    AlignItems, Color, ComputedStyle, Display, Edges, JustifyContent, Length, StyleMap,
+};
 
 /// An axis-aligned rectangle in CSS pixels (top-left origin).
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -84,6 +87,7 @@ pub fn layout_document(dom: &Dom, styles: &StyleMap, viewport_width: f32) -> Opt
 struct BuildBox {
     node: Option<NodeId>,
     block: bool,
+    flex: bool,
     style: ComputedStyle,
     text: Option<String>,
     children: Vec<BuildBox>,
@@ -107,6 +111,7 @@ fn build(
                 return Vec::new();
             }
             let block = style.display != Display::Inline;
+            let flex = style.display == Display::Flex;
             let mut children = Vec::new();
             for &child in dom.children(node) {
                 children.extend(build(dom, styles, child, style));
@@ -117,6 +122,7 @@ fn build(
             vec![BuildBox {
                 node: Some(node),
                 block,
+                flex,
                 style: style.clone(),
                 text: None,
                 children,
@@ -130,6 +136,7 @@ fn build(
             vec![BuildBox {
                 node: Some(node),
                 block: false,
+                flex: false,
                 style: parent_style.clone(),
                 text: Some(collapsed),
                 children: Vec::new(),
@@ -176,6 +183,7 @@ fn anonymous_block(children: Vec<BuildBox>, parent_style: &ComputedStyle) -> Bui
     BuildBox {
         node: None,
         block: true,
+        flex: false,
         style,
         text: None,
         children,
@@ -185,22 +193,38 @@ fn anonymous_block(children: Vec<BuildBox>, parent_style: &ComputedStyle) -> Bui
 // --- layout -------------------------------------------------------------------
 
 fn layout_block(b: &BuildBox, containing_width: f32, origin_x: f32, origin_y: f32) -> LayoutBox {
+    let content_width = content_width_of(b, containing_width);
+    layout_block_sized(b, content_width, containing_width, origin_x, origin_y)
+}
+
+/// The content-box width of `b`: its explicit width, else it fills the
+/// container (minus its own margins/padding/border).
+fn content_width_of(b: &BuildBox, containing_width: f32) -> f32 {
+    let fs = b.style.font_size;
+    let m = resolve_edges(b.style.margin, fs, containing_width);
+    let p = resolve_edges(b.style.padding, fs, containing_width);
+    let bd = resolve_edges(b.style.border_width, fs, containing_width);
+    match b.style.width {
+        Length::Auto => {
+            (containing_width - m.left - m.right - p.left - p.right - bd.left - bd.right).max(0.0)
+        }
+        other => other.to_px(fs, containing_width),
+    }
+}
+
+/// Lay out `b` with an already-decided `content_width` (so flex can force item
+/// main sizes). `containing_width` is used only to resolve percentage edges.
+fn layout_block_sized(
+    b: &BuildBox,
+    content_width: f32,
+    containing_width: f32,
+    origin_x: f32,
+    origin_y: f32,
+) -> LayoutBox {
     let fs = b.style.font_size;
     let margin = resolve_edges(b.style.margin, fs, containing_width);
     let padding = resolve_edges(b.style.padding, fs, containing_width);
     let border = resolve_edges(b.style.border_width, fs, containing_width);
-
-    let content_width = match b.style.width {
-        Length::Auto => (containing_width
-            - margin.left
-            - margin.right
-            - padding.left
-            - padding.right
-            - border.left
-            - border.right)
-            .max(0.0),
-        other => other.to_px(fs, containing_width),
-    };
 
     let border_x = origin_x + margin.left;
     let border_y = origin_y + margin.top;
@@ -208,7 +232,18 @@ fn layout_block(b: &BuildBox, containing_width: f32, origin_x: f32, origin_y: f3
     let content_y = border_y + border.top + padding.top;
 
     let mut children = Vec::new();
-    let content_height = if b.children.iter().any(|c| c.block) {
+    let content_height = if b.flex {
+        let (boxes, height) = layout_flex(
+            &b.children,
+            content_x,
+            content_y,
+            content_width,
+            b.style.justify_content,
+            b.style.align_items,
+        );
+        children = boxes;
+        height
+    } else if b.children.iter().any(|c| c.block) {
         let mut cursor_y = content_y;
         for child in &b.children {
             let laid = layout_block(child, content_width, content_x, cursor_y);
@@ -246,6 +281,122 @@ fn layout_block(b: &BuildBox, containing_width: f32, origin_x: f32, origin_y: f3
         font_size: fs,
         text: None,
         children,
+    }
+}
+
+/// Lay out flex items in a row: main-axis sizing from width + `flex-grow`,
+/// `justify-content` distribution of free space, and `align-items` on the
+/// cross axis. (Single line, no wrap/shrink/basis-from-content yet.)
+fn layout_flex(
+    items: &[BuildBox],
+    content_x: f32,
+    content_y: f32,
+    container_width: f32,
+    justify: JustifyContent,
+    align: AlignItems,
+) -> (Vec<LayoutBox>, f32) {
+    if items.is_empty() {
+        return (Vec::new(), 0.0);
+    }
+    let n = items.len();
+
+    // Base main sizes (auto basis = 0 for now) and horizontal box extras.
+    let bases: Vec<f32> = items
+        .iter()
+        .map(|it| flex_base_width(it, container_width))
+        .collect();
+    let extras: Vec<f32> = items
+        .iter()
+        .map(|it| horizontal_extras(it, container_width))
+        .collect();
+    let total_base: f32 = bases.iter().zip(&extras).map(|(b, e)| b + e).sum();
+    let free = (container_width - total_base).max(0.0);
+    let sum_grow: f32 = items.iter().map(|it| it.style.flex_grow).sum();
+
+    let widths: Vec<f32> = items
+        .iter()
+        .enumerate()
+        .map(|(i, it)| {
+            if sum_grow > 0.0 {
+                bases[i] + it.style.flex_grow / sum_grow * free
+            } else {
+                bases[i]
+            }
+        })
+        .collect();
+
+    let outer_w: Vec<f32> = (0..n).map(|i| widths[i] + extras[i]).collect();
+    // Measure cross sizes (item heights) by laying each out once.
+    let outer_h: Vec<f32> = items
+        .iter()
+        .enumerate()
+        .map(|(i, it)| {
+            let laid = layout_block_sized(it, widths[i], container_width, content_x, content_y);
+            laid.margin.top + laid.rect.height + laid.margin.bottom
+        })
+        .collect();
+    let cross = outer_h.iter().copied().fold(0.0_f32, f32::max);
+
+    let used: f32 = outer_w.iter().sum();
+    let leftover = (container_width - used).max(0.0);
+    let (leading, gap) = justify_offsets(justify, leftover, n);
+
+    let mut boxes = Vec::with_capacity(n);
+    let mut cursor = content_x + leading;
+    for (i, it) in items.iter().enumerate() {
+        let cross_off = cross_offset(align, outer_h[i], cross);
+        boxes.push(layout_block_sized(
+            it,
+            widths[i],
+            container_width,
+            cursor,
+            content_y + cross_off,
+        ));
+        cursor += outer_w[i] + gap;
+    }
+    (boxes, cross)
+}
+
+fn flex_base_width(item: &BuildBox, container_width: f32) -> f32 {
+    match item.style.width {
+        Length::Auto => 0.0,
+        other => other.to_px(item.style.font_size, container_width),
+    }
+}
+
+fn horizontal_extras(item: &BuildBox, container_width: f32) -> f32 {
+    let fs = item.style.font_size;
+    let m = resolve_edges(item.style.margin, fs, container_width);
+    let p = resolve_edges(item.style.padding, fs, container_width);
+    let bd = resolve_edges(item.style.border_width, fs, container_width);
+    m.left + m.right + p.left + p.right + bd.left + bd.right
+}
+
+fn justify_offsets(justify: JustifyContent, leftover: f32, n: usize) -> (f32, f32) {
+    match justify {
+        JustifyContent::Start => (0.0, 0.0),
+        JustifyContent::Center => (leftover / 2.0, 0.0),
+        JustifyContent::End => (leftover, 0.0),
+        JustifyContent::SpaceBetween => (
+            0.0,
+            if n > 1 {
+                leftover / (n - 1) as f32
+            } else {
+                0.0
+            },
+        ),
+        JustifyContent::SpaceAround => {
+            let gap = leftover / n as f32;
+            (gap / 2.0, gap)
+        }
+    }
+}
+
+fn cross_offset(align: AlignItems, item_height: f32, cross: f32) -> f32 {
+    match align {
+        AlignItems::Start | AlignItems::Stretch => 0.0,
+        AlignItems::Center => (cross - item_height) / 2.0,
+        AlignItems::End => cross - item_height,
     }
 }
 
@@ -397,6 +548,46 @@ mod tests {
         // First div at y=8, second stacked directly below at y=38.
         assert!(heights_and_y.contains(&(30.0, 8.0)), "{heights_and_y:?}");
         assert!(heights_and_y.contains(&(40.0, 38.0)), "{heights_and_y:?}");
+    }
+
+    #[test]
+    fn flex_row_distributes_free_space_by_grow() {
+        // body content width = 400 - 16 = 384. Item 1 is 100px; item 2 has
+        // flex:1 so it absorbs the remaining 284px.
+        let root = layout(
+            "<html><body><div style=\"display:flex\">\
+             <div style=\"width:100px;height:20px\"></div>\
+             <div style=\"flex:1;height:20px\"></div></div></body></html>",
+            "",
+            400.0,
+        );
+        let boxes = collect(&root);
+        let has = |x: f32, w: f32| {
+            boxes
+                .iter()
+                .any(|b| (b.rect.x - x).abs() < 0.5 && (b.rect.width - w).abs() < 0.5)
+        };
+        assert!(has(8.0, 100.0), "first item at x=8 w=100");
+        assert!(has(108.0, 284.0), "grown item at x=108 w=284");
+    }
+
+    #[test]
+    fn flex_justify_content_end_right_aligns() {
+        let root = layout(
+            "<html><body><div style=\"display:flex;justify-content:flex-end\">\
+             <div style=\"width:50px;height:10px\"></div>\
+             <div style=\"width:50px;height:10px\"></div></div></body></html>",
+            "",
+            400.0,
+        );
+        let boxes = collect(&root);
+        // leftover = 384 - 100 = 284 of leading; items sit at the right edge.
+        assert!(boxes
+            .iter()
+            .any(|b| (b.rect.x - 292.0).abs() < 0.5 && (b.rect.width - 50.0).abs() < 0.5));
+        assert!(boxes
+            .iter()
+            .any(|b| (b.rect.x - 342.0).abs() < 0.5 && (b.rect.width - 50.0).abs() < 0.5));
     }
 
     #[test]

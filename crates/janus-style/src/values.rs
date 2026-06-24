@@ -82,6 +82,8 @@ pub enum Display {
     InlineBlock,
     /// `display: list-item`.
     ListItem,
+    /// `display: flex` — a (row) flex container.
+    Flex,
     /// `display: none` — the element and its subtree are not rendered.
     None,
 }
@@ -95,6 +97,34 @@ pub enum TextAlign {
     Center,
     /// End/right.
     Right,
+}
+
+/// `justify-content` — main-axis distribution in a flex container.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum JustifyContent {
+    /// Pack items at the start.
+    Start,
+    /// Center items.
+    Center,
+    /// Pack items at the end.
+    End,
+    /// First/last flush; equal gaps between.
+    SpaceBetween,
+    /// Equal gaps around each item.
+    SpaceAround,
+}
+
+/// `align-items` — cross-axis alignment in a flex container.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AlignItems {
+    /// Fill the cross axis (treated as `Start` until items can be resized).
+    Stretch,
+    /// Align to the cross start.
+    Start,
+    /// Center on the cross axis.
+    Center,
+    /// Align to the cross end.
+    End,
 }
 
 /// The four sides of a box (margin, padding, border widths).

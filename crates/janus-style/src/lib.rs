@@ -14,7 +14,8 @@
 mod values;
 
 pub use values::{
-    parse_color, parse_edges, parse_length, Color, Display, Edges, Length, TextAlign,
+    parse_color, parse_edges, parse_length, AlignItems, Color, Display, Edges, JustifyContent,
+    Length, TextAlign,
 };
 
 use std::collections::HashMap;
@@ -49,6 +50,12 @@ pub struct ComputedStyle {
     pub border_color: Color,
     /// `text-align` (inherited).
     pub text_align: TextAlign,
+    /// `flex-grow` (flex items).
+    pub flex_grow: f32,
+    /// `justify-content` (flex containers).
+    pub justify_content: JustifyContent,
+    /// `align-items` (flex containers).
+    pub align_items: AlignItems,
 }
 
 impl ComputedStyle {
@@ -68,6 +75,9 @@ impl ComputedStyle {
             border_width: Edges::all(Length::Px(0.0)),
             border_color: Color::BLACK,
             text_align: TextAlign::Left,
+            flex_grow: 0.0,
+            justify_content: JustifyContent::Start,
+            align_items: AlignItems::Stretch,
         }
     }
 
@@ -299,7 +309,53 @@ fn apply_declaration(style: &mut ComputedStyle, name: &str, value: &str, parent_
                 style.text_align = t;
             }
         }
+        "flex-grow" => {
+            if let Ok(g) = value.trim().parse::<f32>() {
+                style.flex_grow = g.max(0.0);
+            }
+        }
+        "flex" => {
+            // Shorthand: the first number is flex-grow (basis/shrink deferred).
+            if let Some(g) = value
+                .split_whitespace()
+                .next()
+                .and_then(|t| t.parse::<f32>().ok())
+            {
+                style.flex_grow = g.max(0.0);
+            }
+        }
+        "justify-content" => {
+            if let Some(j) = parse_justify(value) {
+                style.justify_content = j;
+            }
+        }
+        "align-items" => {
+            if let Some(a) = parse_align(value) {
+                style.align_items = a;
+            }
+        }
         _ => {}
+    }
+}
+
+fn parse_justify(value: &str) -> Option<JustifyContent> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "flex-start" | "start" | "left" | "normal" => Some(JustifyContent::Start),
+        "center" => Some(JustifyContent::Center),
+        "flex-end" | "end" | "right" => Some(JustifyContent::End),
+        "space-between" => Some(JustifyContent::SpaceBetween),
+        "space-around" => Some(JustifyContent::SpaceAround),
+        _ => None,
+    }
+}
+
+fn parse_align(value: &str) -> Option<AlignItems> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "stretch" | "normal" => Some(AlignItems::Stretch),
+        "flex-start" | "start" => Some(AlignItems::Start),
+        "center" => Some(AlignItems::Center),
+        "flex-end" | "end" => Some(AlignItems::End),
+        _ => None,
     }
 }
 
@@ -339,6 +395,7 @@ fn parse_display(value: &str) -> Option<Display> {
         "block" => Some(Display::Block),
         "inline-block" => Some(Display::InlineBlock),
         "list-item" => Some(Display::ListItem),
+        "flex" | "inline-flex" => Some(Display::Flex),
         "none" => Some(Display::None),
         _ => None,
     }
