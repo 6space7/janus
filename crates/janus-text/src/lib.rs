@@ -122,7 +122,8 @@ fn blend_pixel(pixmap: &mut Pixmap, x: i32, y: i32, sr: u8, sg: u8, sb: u8, sa: 
     if x < 0 || y < 0 || x >= w || y >= h || sa == 0 {
         return;
     }
-    let idx = (y * w + x) as usize;
+    // Index in usize so the multiply can't overflow i32 on a very large pixmap.
+    let idx = y as usize * w as usize + x as usize;
     let pixels = pixmap.pixels_mut();
     let dst = pixels[idx];
     let a = u32::from(sa);
