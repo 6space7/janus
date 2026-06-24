@@ -15,9 +15,7 @@
 //! P0 emits the full visible tree; tiered summary + expand-on-demand and the
 //! nonce-bound TOCTOU-safe `act` revalidation come next.
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 
 use janus_dom::{Dom, NodeData, NodeId};
 use janus_layout::{LayoutBox, Rect};
@@ -318,14 +316,21 @@ fn collect_text(dom: &Dom, node: NodeId, out: &mut String) {
     }
 }
 
+/// FNV-1a 64-bit over `role | name | path`. Unlike `DefaultHasher` (explicitly
+/// not guaranteed stable across Rust versions/platforms), this is fixed forever,
+/// so an agent's `stable_id` handle is durable across runs and toolchains.
 fn stable_id(role: &str, name: &str, path: &str) -> String {
-    let mut hasher = DefaultHasher::new();
-    role.hash(&mut hasher);
-    0u8.hash(&mut hasher);
-    name.hash(&mut hasher);
-    0u8.hash(&mut hasher);
-    path.hash(&mut hasher);
-    format!("s{:016x}", hasher.finish())
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for part in [role, name, path] {
+        for &byte in part.as_bytes() {
+            h ^= u64::from(byte);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        // Field separator so ("ab","c",…) and ("a","bc",…) differ.
+        h ^= 0xff;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("s{h:016x}")
 }
 
 fn geometry_map(root: &LayoutBox) -> HashMap<NodeId, Rect> {
