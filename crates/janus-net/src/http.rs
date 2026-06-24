@@ -91,8 +91,16 @@ fn dechunk(data: &[u8]) -> Vec<u8> {
         if size == 0 {
             break; // last chunk
         }
-        let end = (i + size).min(data.len());
+        // Reject oversized/truncated chunks (checked add avoids overflow on a
+        // hostile `Transfer-Encoding: chunked` size like `ffffffffffffffff`).
+        let Some(end) = i.checked_add(size).filter(|&e| e <= data.len()) else {
+            break;
+        };
         out.extend_from_slice(&data[i..end]);
+        // Each chunk must be followed by CRLF; stop if it is missing/misaligned.
+        if data.get(end..end + 2) != Some(b"\r\n".as_slice()) {
+            break;
+        }
         i = end + 2; // past chunk data + trailing CRLF
     }
     out
@@ -140,6 +148,22 @@ mod tests {
         let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
         let r = parse_response(raw).unwrap();
         assert_eq!(r.body, b"hello world");
+    }
+
+    #[test]
+    fn dechunk_rejects_oversized_chunk_without_panic() {
+        // A hostile chunk size of usize::MAX must not overflow/panic.
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\nhello";
+        let r = parse_response(raw).unwrap();
+        assert!(r.body.is_empty());
+    }
+
+    #[test]
+    fn dechunk_stops_on_missing_crlf() {
+        // Chunk data not followed by CRLF: take the chunk, then stop (no desync).
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhelloXX";
+        let r = parse_response(raw).unwrap();
+        assert_eq!(r.body, b"hello");
     }
 
     #[test]
