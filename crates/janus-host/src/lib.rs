@@ -66,6 +66,12 @@ impl Page {
         janus_sem::snapshot_text(&self.dom, &self.styles, &self.layout)
     }
 
+    /// The document's `<title>` text, collapsed, if present and non-empty.
+    #[must_use]
+    pub fn title(&self) -> Option<String> {
+        find_title(&self.dom, self.dom.document())
+    }
+
     /// The page's visible text content (`display:none` excluded).
     #[must_use]
     pub fn extract_text(&self) -> String {
@@ -424,6 +430,24 @@ fn stylesheet_href(dom: &Dom, node: NodeId) -> Option<&str> {
     }
 }
 
+fn find_title(dom: &Dom, node: NodeId) -> Option<String> {
+    if dom.element_name(node) == Some("title") {
+        let mut s = String::new();
+        for &child in dom.children(node) {
+            if let Some(NodeData::Text(t)) = dom.node(child).map(|n| &n.data) {
+                s.push_str(t);
+            }
+        }
+        let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !s.is_empty() {
+            return Some(s);
+        }
+    }
+    dom.children(node)
+        .iter()
+        .find_map(|&child| find_title(dom, child))
+}
+
 fn collect_visible_text(dom: &Dom, styles: &StyleMap, node: NodeId, out: &mut String) {
     let Some(n) = dom.node(node) else {
         return;
@@ -487,6 +511,19 @@ mod tests {
     #[test]
     fn empty_document_renders_nothing() {
         assert!(render_html("", None, 800.0).is_none());
+    }
+
+    #[test]
+    fn extracts_collapsed_title() {
+        let page = render_html(
+            "<html><head><title>  Hello   World </title></head><body>x</body></html>",
+            None,
+            800.0,
+        )
+        .expect("page");
+        assert_eq!(page.title().as_deref(), Some("Hello World"));
+        let untitled = render_html("<html><body>x</body></html>", None, 800.0).expect("page");
+        assert_eq!(untitled.title(), None);
     }
 
     #[test]

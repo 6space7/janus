@@ -82,7 +82,7 @@ Status legend: ✅ working · 🟡 partial · ⬜ stub.
 | `janus-text` | Real text: system fonts + shaping + glyph raster (cosmic-text) | 🟡 |
 | `janus-js` | V8 host: rooting bridge + WebIDL DOM bindings | ⬜ |
 | `janus-sandbox` | Multi-process isolation + OS sandbox policy | ⬜ |
-| `janus-shell` | Desktop window: render + scroll + click-to-navigate (winit/softbuffer) | 🟡 |
+| `janus-shell` | Desktop browser (egui): tabs, address bar, back/forward, scroll, click-to-navigate, HiDPI | 🟡 |
 
 ## Quickstart
 
