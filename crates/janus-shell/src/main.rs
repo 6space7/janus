@@ -39,6 +39,7 @@ struct Janus {
     hist_index: usize,
     jar: CookieJar,
     last_width: f32,
+    last_ppp: f32,
     started: bool,
 }
 
@@ -55,6 +56,7 @@ impl Janus {
             hist_index: 0,
             jar: CookieJar::new(),
             last_width: 1024.0,
+            last_ppp: 1.0,
             started: false,
         }
     }
@@ -64,7 +66,7 @@ impl Janus {
     fn load(&mut self, ctx: &egui::Context, url: &str, width: f32) -> bool {
         match janus_host::render_url_with_jar(url, width.max(1.0), &mut self.jar) {
             Ok(page) => {
-                if let Some(pm) = janus_paint::paint(&page.layout) {
+                if let Some(pm) = janus_paint::paint_scaled(&page.layout, ctx.pixels_per_point()) {
                     let size = [pm.width() as usize, pm.height() as usize];
                     let image = egui::ColorImage::from_rgba_unmultiplied(size, pm.data());
                     self.texture =
@@ -113,7 +115,7 @@ impl Janus {
         if let Some(page) = &mut self.page {
             if let Some(layout) = janus_layout::layout_document(&page.dom, &page.styles, width) {
                 page.layout = layout;
-                if let Some(pm) = janus_paint::paint(&page.layout) {
+                if let Some(pm) = janus_paint::paint_scaled(&page.layout, ctx.pixels_per_point()) {
                     let size = [pm.width() as usize, pm.height() as usize];
                     let image = egui::ColorImage::from_rgba_unmultiplied(size, pm.data());
                     self.texture =
@@ -163,14 +165,19 @@ impl eframe::App for Janus {
         // Page.
         egui::CentralPanel::default().show(ctx, |ui| {
             let width = ui.available_width();
+            let ppp = ctx.pixels_per_point();
 
             if !self.started {
                 self.started = true;
                 self.last_width = width;
+                self.last_ppp = ppp;
                 let url = normalize_url(&self.address.clone());
                 self.navigate(ctx, url, width);
-            } else if (width - self.last_width).abs() > 1.0 {
+            } else if (width - self.last_width).abs() > 1.0 || (ppp - self.last_ppp).abs() > 0.01 {
+                // Re-render on width *or* DPI change (e.g. dragged to another monitor)
+                // so the texture is always rasterized at the current device resolution.
                 self.last_width = width;
+                self.last_ppp = ppp;
                 self.reflow(ctx, width);
             }
 
@@ -178,7 +185,10 @@ impl eframe::App for Janus {
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     if let Some(texture) = &self.texture {
-                        let size = egui::vec2(self.tex_size.0 as f32, self.tex_size.1 as f32);
+                        // The texture is rasterized at `ppp` device px per CSS px;
+                        // display it back at logical points so it stays crisp 1:1.
+                        let size =
+                            egui::vec2(self.tex_size.0 as f32 / ppp, self.tex_size.1 as f32 / ppp);
                         let resp = ui.add(
                             egui::Image::new(texture)
                                 .fit_to_exact_size(size)

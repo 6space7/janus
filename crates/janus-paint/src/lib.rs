@@ -98,22 +98,35 @@ pub fn canvas_size(root: &LayoutBox) -> PixelSize {
     PixelSize::new(w as u32, h as u32)
 }
 
-/// Render a display list onto a fresh white pixmap of `size`.
+/// Render a display list onto a fresh white pixmap of `size`, scaling all
+/// geometry by `scale` (use `scale > 1.0` for crisp HiDPI / device-pixel output).
 #[must_use]
-pub fn render(items: &[DisplayItem], size: PixelSize) -> Option<Pixmap> {
+pub fn render(items: &[DisplayItem], size: PixelSize, scale: f32) -> Option<Pixmap> {
     let mut pixmap = Pixmap::new(size.width.max(1), size.height.max(1))?;
     pixmap.fill(tiny_skia::Color::WHITE);
     let mut text = janus_text::TextContext::new();
     for item in items {
-        paint_item(&mut pixmap, item, &mut text);
+        paint_item(&mut pixmap, item, &mut text, scale);
     }
     Some(pixmap)
 }
 
-/// Lay out-to-pixels convenience: build the list, size the canvas, render.
+/// Lay out-to-pixels convenience: build the list, size the canvas, render at 1×.
 #[must_use]
 pub fn paint(root: &LayoutBox) -> Option<Pixmap> {
-    render(&build_display_list(root), canvas_size(root))
+    render(&build_display_list(root), canvas_size(root), 1.0)
+}
+
+/// Like [`paint`] but renders at `scale`× device pixels — the page laid out in
+/// CSS px is rasterized at higher resolution for crisp HiDPI display.
+#[must_use]
+pub fn paint_scaled(root: &LayoutBox, scale: f32) -> Option<Pixmap> {
+    let base = canvas_size(root);
+    let size = PixelSize::new(
+        ((base.width as f32 * scale).ceil() as u32).max(1),
+        ((base.height as f32 * scale).ceil() as u32).max(1),
+    );
+    render(&build_display_list(root), size, scale)
 }
 
 /// Render the tree and encode it as PNG bytes.
@@ -122,47 +135,65 @@ pub fn paint_png(root: &LayoutBox) -> Option<Vec<u8>> {
     paint(root)?.encode_png().ok()
 }
 
-fn paint_item(pixmap: &mut Pixmap, item: &DisplayItem, text: &mut janus_text::TextContext) {
+fn paint_item(
+    pixmap: &mut Pixmap,
+    item: &DisplayItem,
+    text: &mut janus_text::TextContext,
+    scale: f32,
+) {
     match item {
-        DisplayItem::Rect { rect, color } => fill_rect(pixmap, *rect, *color),
+        DisplayItem::Rect { rect, color } => fill_rect(pixmap, scaled(*rect, scale), *color),
         DisplayItem::Border {
             rect,
             widths,
             color,
         } => {
-            // Top, bottom, left, right as filled edge strips.
+            let r = *rect;
+            // Top, bottom, left, right as filled edge strips (all scaled).
             fill_rect(
                 pixmap,
-                Rect {
-                    height: widths.top,
-                    ..*rect
-                },
+                scaled(
+                    Rect {
+                        height: widths.top,
+                        ..r
+                    },
+                    scale,
+                ),
                 *color,
             );
             fill_rect(
                 pixmap,
-                Rect {
-                    y: rect.y + rect.height - widths.bottom,
-                    height: widths.bottom,
-                    ..*rect
-                },
+                scaled(
+                    Rect {
+                        y: r.y + r.height - widths.bottom,
+                        height: widths.bottom,
+                        ..r
+                    },
+                    scale,
+                ),
                 *color,
             );
             fill_rect(
                 pixmap,
-                Rect {
-                    width: widths.left,
-                    ..*rect
-                },
+                scaled(
+                    Rect {
+                        width: widths.left,
+                        ..r
+                    },
+                    scale,
+                ),
                 *color,
             );
             fill_rect(
                 pixmap,
-                Rect {
-                    x: rect.x + rect.width - widths.right,
-                    width: widths.right,
-                    ..*rect
-                },
+                scaled(
+                    Rect {
+                        x: r.x + r.width - widths.right,
+                        width: widths.right,
+                        ..r
+                    },
+                    scale,
+                ),
                 *color,
             );
         }
@@ -174,13 +205,22 @@ fn paint_item(pixmap: &mut Pixmap, item: &DisplayItem, text: &mut janus_text::Te
         } => {
             text.draw_run(
                 pixmap,
-                rect.x,
-                rect.y,
+                rect.x * scale,
+                rect.y * scale,
                 run,
-                *font_size,
+                font_size * scale,
                 (color.r, color.g, color.b, color.a),
             );
         }
+    }
+}
+
+fn scaled(r: Rect, s: f32) -> Rect {
+    Rect {
+        x: r.x * s,
+        y: r.y * s,
+        width: r.width * s,
+        height: r.height * s,
     }
 }
 
@@ -211,7 +251,7 @@ impl janus_traits::Rasterizer for CpuRasterizer {
         list: &Self::DisplayList,
         size: PixelSize,
     ) -> Result<Self::Surface, Self::Error> {
-        render(list, size).ok_or_else(|| "failed to allocate pixmap".to_string())
+        render(list, size, 1.0).ok_or_else(|| "failed to allocate pixmap".to_string())
     }
 }
 
