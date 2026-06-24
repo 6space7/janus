@@ -426,12 +426,16 @@ fn layout_inline(
             line_height = 0.0;
         }
 
+        // An unbreakable word wider than the line overflows visually (CSS
+        // `overflow: visible`), but keep the *reported* box within the
+        // container so agent geometry never points outside the page.
+        let reported_width = advance.min((right - cursor_x).max(0.0));
         boxes.push(LayoutBox {
             node: fragment.node,
             rect: Rect {
                 x: cursor_x,
                 y: cursor_y,
-                width: advance,
+                width: reported_width,
                 height: lh,
             },
             margin: Edges::all(0.0),
@@ -588,6 +592,26 @@ mod tests {
         assert!(boxes
             .iter()
             .any(|b| (b.rect.x - 342.0).abs() < 0.5 && (b.rect.width - 50.0).abs() < 0.5));
+    }
+
+    #[test]
+    fn over_wide_word_box_stays_within_container() {
+        // div content width = 50px at x=8 → right edge 58. An unbreakable word
+        // overflows visually, but its reported box must not exceed the box.
+        let root = layout(
+            "<html><body><div style=\"width:50px\">verylongunbreakableword</div></body></html>",
+            "",
+            400.0,
+        );
+        let frag = collect(&root)
+            .into_iter()
+            .find(|b| b.text.is_some())
+            .expect("text fragment");
+        assert!(
+            frag.rect.x + frag.rect.width <= 58.5,
+            "fragment {:?} escapes container",
+            frag.rect
+        );
     }
 
     #[test]
