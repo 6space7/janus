@@ -888,7 +888,9 @@ name = "janus-shell"
 version = "0.0.0"
 dependencies = [
  "janus-host",
+ "janus-layout",
  "janus-paint",
+ "janus-text",
  "softbuffer",
  "tiny-skia",
  "winit",
