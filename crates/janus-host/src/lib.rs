@@ -10,7 +10,10 @@
 //! `janus-agent` (the MCP semantic surface) both build a [`Page`] here, so the
 //! pipeline lives in exactly one place.
 
+use std::collections::{HashMap, HashSet};
+use std::io::Cursor;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use janus_bytes::Url;
@@ -21,9 +24,24 @@ use janus_traits::RasterImage;
 
 pub use janus_net::CookieJar;
 
-/// Cap on images fetched/decoded per page (a guard against a hostile page with
-/// thousands of `<img>` tags exhausting time/memory).
+/// Cap on image *fetch/decode attempts* per page (counts work done, not just
+/// successes, so a page of thousands of broken `<img>` can't fan out).
 const MAX_IMAGES: usize = 100;
+/// Wall-clock budget for gathering all of a page's images, so slow/dead hosts
+/// can't stall a render indefinitely.
+const IMAGE_BUDGET: Duration = Duration::from_secs(15);
+/// Aggregate cap on decoded image bytes held by one page (resident memory).
+const MAX_TOTAL_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
+/// Cap on a single decoded image's RGBA buffer, and the decoder's allocation.
+const MAX_IMAGE_ALLOC: u64 = 64 * 1024 * 1024;
+/// Cap on a single image's *encoded* bytes (before decode).
+const MAX_ENCODED_BYTES: usize = 24 * 1024 * 1024;
+/// Cap on a decoded image's pixel dimensions (each axis).
+const MAX_IMAGE_DIM: u32 = 8192;
+/// Concurrent image-fetch workers. Images are fetched in parallel because each
+/// fetch is a blocking round-trip (connect + TLS, no keep-alive); serial fetches
+/// would make an image-heavy page take many seconds.
+const MAX_IMAGE_WORKERS: usize = 8;
 
 /// A fully processed page: one layout pass, ready for either painter.
 #[derive(Debug)]
@@ -155,7 +173,7 @@ pub fn render_html(html: &str, base_url: Option<Url>, width: f32) -> Option<Page
     let dom = janus_html::parse(html);
     let css = gather_css(&dom, base_url.as_ref());
     let styles = janus_style::compute_styles(&dom, &janus_css::Stylesheet::parse(&css));
-    let images = gather_images(&dom, base_url.as_ref());
+    let images = gather_images(&dom, &styles, base_url.as_ref());
     let layout = janus_layout::layout_document_with_images(&dom, &styles, width, &images)?;
     Some(Page {
         dom,
@@ -227,33 +245,116 @@ fn gather_css_from(dom: &Dom, node: NodeId, base: Option<&Url>, out: &mut String
     }
 }
 
-/// Fetch + decode every `<img src>` reachable from the document, keyed by node.
-/// Network fetches only happen when a `base` is set (so `render_html` stays
-/// hermetic for local input); `data:` URIs are always decoded.
-fn gather_images(dom: &Dom, base: Option<&Url>) -> ImageStore {
+/// Fetch + decode every *visible* `<img src>` in the document, keyed by node.
+///
+/// Visible images (`display:none` subtrees excluded — matching the render/extract
+/// surface and shrinking the SSRF surface) are gathered, deduplicated by URL, and
+/// decoded **concurrently** on a bounded worker pool. Bounded by [`MAX_IMAGES`]
+/// distinct images, [`IMAGE_BUDGET`] wall-clock, and [`MAX_TOTAL_IMAGE_BYTES`]
+/// resident bytes. Network fetches happen only when a `base` is set (so
+/// `render_html` stays hermetic for local input); `data:` URIs are always decoded.
+fn gather_images(dom: &Dom, styles: &StyleMap, base: Option<&Url>) -> ImageStore {
+    // 1. Collect visible <img> nodes (node, src), capped at MAX_IMAGES.
+    let mut nodes: Vec<(NodeId, String)> = Vec::new();
+    collect_image_nodes(dom, styles, dom.document(), &mut nodes);
+
+    // 2. Unique srcs (first-seen order) — fetch/decode each at most once.
+    let mut unique: Vec<String> = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    for (_, src) in &nodes {
+        if seen.insert(src.as_str()) {
+            unique.push(src.clone());
+        }
+    }
+
+    // 3. Decode them concurrently.
+    let decoded = decode_all(&unique, base);
+
+    // 4. Assemble the store, charging each distinct image once against the byte
+    //    budget; every node sharing a src gets the same shared Arc.
     let mut store = ImageStore::new();
-    collect_images(dom, dom.document(), base, &mut store);
+    let mut bytes_remaining = MAX_TOTAL_IMAGE_BYTES;
+    let mut admitted: HashSet<&str> = HashSet::new();
+    for (node, src) in &nodes {
+        let Some(image) = decoded.get(src) else {
+            continue;
+        };
+        if !admitted.contains(src.as_str()) {
+            let bytes = image.rgba.len() as u64;
+            if bytes > bytes_remaining {
+                continue; // over the aggregate memory budget — drop it
+            }
+            bytes_remaining -= bytes;
+            admitted.insert(src.as_str());
+        }
+        store.insert(*node, image.clone());
+    }
     store
 }
 
-fn collect_images(dom: &Dom, node: NodeId, base: Option<&Url>, store: &mut ImageStore) {
-    if store.len() >= MAX_IMAGES {
+/// Walk the rendered tree collecting `(node, src)` for each visible `<img>`, up
+/// to [`MAX_IMAGES`]. A missing style entry means the node is under a
+/// `display:none` ancestor (the cascade prunes those) → treat as hidden and do
+/// not recurse into it.
+fn collect_image_nodes(
+    dom: &Dom,
+    styles: &StyleMap,
+    node: NodeId,
+    out: &mut Vec<(NodeId, String)>,
+) {
+    if out.len() >= MAX_IMAGES {
         return;
     }
-    if dom.element_name(node) == Some("img") {
-        if let Some(src) = dom.attr(node, "src") {
-            if let Some(image) = load_image(src, base) {
-                store.insert(node, Arc::new(image));
+    if matches!(dom.node(node).map(|n| &n.data), Some(NodeData::Element(_))) {
+        match styles.get(&node) {
+            Some(s) if s.display != Display::None => {}
+            _ => return,
+        }
+        if dom.element_name(node) == Some("img") {
+            if let Some(src) = dom.attr(node, "src") {
+                out.push((node, src.to_string()));
             }
         }
     }
     for &child in dom.children(node) {
-        collect_images(dom, child, base, store);
+        collect_image_nodes(dom, styles, child, out);
     }
 }
 
+/// Decode `srcs` concurrently on a bounded worker pool, mapping each src to its
+/// decoded image. A shared wall-clock deadline ([`IMAGE_BUDGET`]) stops workers
+/// from *starting* new fetches once it passes; each in-flight fetch is already
+/// individually time-bounded by `janus-net`.
+fn decode_all(srcs: &[String], base: Option<&Url>) -> HashMap<String, Arc<RasterImage>> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    if srcs.is_empty() {
+        return HashMap::new();
+    }
+    let next = AtomicUsize::new(0);
+    let out: Mutex<HashMap<String, Arc<RasterImage>>> = Mutex::new(HashMap::new());
+    let deadline = Instant::now() + IMAGE_BUDGET;
+    let workers = srcs.len().min(MAX_IMAGE_WORKERS);
+
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                if i >= srcs.len() || Instant::now() >= deadline {
+                    break;
+                }
+                if let Some(image) = load_image(&srcs[i], base) {
+                    out.lock().unwrap().insert(srcs[i].clone(), Arc::new(image));
+                }
+            });
+        }
+    });
+    out.into_inner().unwrap()
+}
+
 /// Load `src` (a `data:` URI, or an http(s) URL resolved against `base`) and
-/// decode it to straight-alpha RGBA8.
+/// decode it to straight-alpha RGBA8, bounded by encoder/decoder limits.
 fn load_image(src: &str, base: Option<&Url>) -> Option<RasterImage> {
     let bytes = if let Some(rest) = src.strip_prefix("data:") {
         decode_data_uri(rest)?
@@ -266,7 +367,24 @@ fn load_image(src: &str, base: Option<&Url>) -> Option<RasterImage> {
         }
         resp.body
     };
-    let decoded = image::load_from_memory(&bytes).ok()?.to_rgba8();
+    if bytes.len() > MAX_ENCODED_BYTES {
+        return None;
+    }
+    decode_bounded(&bytes)
+}
+
+/// Decode encoded image `bytes` with explicit dimension and allocation limits
+/// (a decompression-bomb defense — `image`'s defaults allow ~512 MiB per call).
+fn decode_bounded(bytes: &[u8]) -> Option<RasterImage> {
+    let mut reader = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_IMAGE_DIM);
+    limits.max_image_height = Some(MAX_IMAGE_DIM);
+    limits.max_alloc = Some(MAX_IMAGE_ALLOC);
+    reader.limits(limits);
+    let decoded = reader.decode().ok()?.into_rgba8();
     let (width, height) = decoded.dimensions();
     Some(RasterImage {
         width,
@@ -282,7 +400,12 @@ fn decode_data_uri(rest: &str) -> Option<Vec<u8>> {
     let meta = &rest[..comma];
     let data = &rest[comma + 1..];
     if meta.split(';').any(|t| t.eq_ignore_ascii_case("base64")) {
-        base64::engine::general_purpose::STANDARD.decode(data).ok()
+        // Base64 in markup is often line-wrapped (MIME style); strip ASCII
+        // whitespace, which the strict STANDARD engine would otherwise reject.
+        let cleaned: Vec<u8> = data.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+        base64::engine::general_purpose::STANDARD
+            .decode(&cleaned)
+            .ok()
     } else {
         // Non-base64 image data URIs are vanishingly rare; take the bytes as-is.
         Some(data.as_bytes().to_vec())
@@ -391,6 +514,48 @@ mod tests {
         // No width/height attrs → intrinsic 3×2.
         assert!((rect.width - 3.0).abs() < 0.01, "width {}", rect.width);
         assert!((rect.height - 2.0).abs() < 0.01, "height {}", rect.height);
+    }
+
+    /// Encode a solid-color PNG and return its base64 (no wrapping).
+    fn png_base64(w: u32, h: u32) -> String {
+        let img = image::RgbaImage::from_pixel(w, h, image::Rgba([0, 0, 255, 255]));
+        let mut png = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        base64::engine::general_purpose::STANDARD.encode(png.get_ref())
+    }
+
+    #[test]
+    fn display_none_image_is_not_loaded() {
+        let b64 = png_base64(2, 2);
+        let html = format!(
+            "<html><body><div style=\"display:none\">\
+             <img src=\"data:image/png;base64,{b64}\"></div></body></html>"
+        );
+        let page = render_html(&html, None, 800.0).expect("page");
+        assert_eq!(page.images.len(), 0, "hidden image must not be loaded");
+    }
+
+    #[test]
+    fn line_wrapped_data_uri_decodes() {
+        // MIME-style 8-col wrapping inserts newlines the strict decoder rejects;
+        // we strip whitespace first, so the image should still decode.
+        let b64 = png_base64(2, 2);
+        let wrapped = b64
+            .as_bytes()
+            .chunks(8)
+            .map(|c| std::str::from_utf8(c).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let html =
+            format!("<html><body><img src=\"data:image/png;base64,{wrapped}\"></body></html>");
+        let page = render_html(&html, None, 800.0).expect("page");
+        assert_eq!(
+            page.images.len(),
+            1,
+            "whitespace-wrapped base64 should decode"
+        );
     }
 
     #[test]

@@ -27,6 +27,10 @@ use janus_traits::RasterImage;
 /// only consumes the pixels, so it stays hermetic and codec-free.
 pub type ImageStore = HashMap<NodeId, Arc<RasterImage>>;
 
+/// Upper bound on a single image box's CSS-px dimensions (each axis). Bounds the
+/// canvas a hostile `<img width/height>` can force a painter to allocate.
+const MAX_IMG_DIM: f32 = 16384.0;
+
 /// An axis-aligned rectangle in CSS pixels (top-left origin).
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Rect {
@@ -221,15 +225,21 @@ fn image_size(dom: &Dom, node: NodeId, image: &RasterImage) -> (f32, f32) {
     }
 }
 
-/// Parse an HTML length attribute (a leading non-negative integer; trailing
-/// `px`/`%` and other junk are ignored — `%` sizing isn't resolved here).
+/// Parse an HTML length attribute: a leading non-negative integer in px.
+/// Percentages return `None` (not resolved here → fall back to intrinsic size),
+/// as do non-finite/overflowing values; the result is capped at [`MAX_IMG_DIM`]
+/// so a hostile attribute can't explode the box or the canvas.
 fn parse_dim(s: &str) -> Option<f32> {
-    let digits: String = s.trim().chars().take_while(char::is_ascii_digit).collect();
+    let t = s.trim();
+    let digits: String = t.chars().take_while(char::is_ascii_digit).collect();
     if digits.is_empty() {
-        None
-    } else {
-        digits.parse::<f32>().ok()
+        return None;
     }
+    if t[digits.len()..].trim_start().starts_with('%') {
+        return None;
+    }
+    let v = digits.parse::<f32>().ok()?;
+    v.is_finite().then(|| v.min(MAX_IMG_DIM))
 }
 
 /// If a block container mixes block- and inline-level children, wrap each run
@@ -544,13 +554,34 @@ fn layout_inline(
                 mut height,
                 image,
             } => {
+                // Sanitize first: non-finite/negative dims (e.g. an overflowing
+                // attribute → Inf, or Inf*0 → NaN) become zero rather than
+                // poisoning geometry the agent and painter consume.
+                if !width.is_finite() || width < 0.0 {
+                    width = 0.0;
+                }
+                if !height.is_finite() || height < 0.0 {
+                    height = 0.0;
+                }
                 // Emulate the ubiquitous `img { max-width: 100% }`: clamp an
                 // over-wide image to the container, preserving aspect ratio, so
                 // a huge source can't blow up the canvas or overflow the page.
-                if width > content_width && content_width > 0.0 && width > 0.0 {
+                if width > content_width && content_width > 0.0 {
                     let s = content_width / width;
                     width *= s;
                     height *= s;
+                }
+                // Absolute caps on both axes (a small-width/huge-height image
+                // would otherwise escape the max-width clamp).
+                if width > MAX_IMG_DIM {
+                    let s = MAX_IMG_DIM / width;
+                    width = MAX_IMG_DIM;
+                    height *= s;
+                }
+                if height > MAX_IMG_DIM {
+                    let s = MAX_IMG_DIM / height;
+                    height = MAX_IMG_DIM;
+                    width *= s;
                 }
                 (
                     width,
@@ -834,6 +865,63 @@ mod tests {
         );
         assert!((b.rect.width - 184.0).abs() < 0.5, "w {}", b.rect.width);
         assert!((b.rect.height - 92.0).abs() < 0.5, "h {}", b.rect.height);
+    }
+
+    #[test]
+    fn percent_width_falls_back_to_intrinsic() {
+        // width="50%" must NOT render as 50px; fall back to intrinsic 20x10.
+        let b = image_box(
+            "<html><body><img width=\"50%\"></body></html>",
+            800.0,
+            RasterImage {
+                width: 20,
+                height: 10,
+                rgba: vec![0; 20 * 10 * 4],
+            },
+        );
+        assert!((b.rect.width - 20.0).abs() < 0.01, "w {}", b.rect.width);
+        assert!((b.rect.height - 10.0).abs() < 0.01, "h {}", b.rect.height);
+    }
+
+    #[test]
+    fn huge_height_attr_is_capped() {
+        // width=10 (survives), height=100000 → capped to MAX_IMG_DIM.
+        let b = image_box(
+            "<html><body><img width=\"10\" height=\"100000\"></body></html>",
+            800.0,
+            RasterImage {
+                width: 10,
+                height: 10,
+                rgba: Vec::new(),
+            },
+        );
+        assert!((b.rect.width - 10.0).abs() < 0.01, "w {}", b.rect.width);
+        assert!(
+            (b.rect.height - MAX_IMG_DIM).abs() < 1.0,
+            "h {}",
+            b.rect.height
+        );
+    }
+
+    #[test]
+    fn overflowing_dimension_falls_back_finite() {
+        // A 40-digit width overflows f32 to Inf; parse_dim rejects it → intrinsic.
+        let nines = "9".repeat(40);
+        let b = image_box(
+            &format!("<html><body><img width=\"{nines}\"></body></html>"),
+            800.0,
+            RasterImage {
+                width: 10,
+                height: 10,
+                rgba: vec![0; 10 * 10 * 4],
+            },
+        );
+        assert!(
+            b.rect.width.is_finite() && b.rect.height.is_finite(),
+            "non-finite geometry: {:?}",
+            b.rect
+        );
+        assert!((b.rect.width - 10.0).abs() < 0.01, "w {}", b.rect.width);
     }
 
     #[test]

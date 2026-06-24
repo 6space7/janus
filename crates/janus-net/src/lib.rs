@@ -12,10 +12,10 @@
 mod cookie;
 mod http;
 
-use std::io::{ErrorKind, Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::io::{Read, Write};
+use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use janus_bytes::Url;
 
@@ -24,6 +24,15 @@ pub use cookie::{Cookie, CookieJar};
 use crate::http::{build_request, header, parse_response};
 
 const MAX_REDIRECTS: usize = 10;
+
+/// Cap on a single response body. The open web is hostile: a server (or a
+/// redirect chain to one) could stream unbounded bytes into memory. 32 MiB is
+/// generous for HTML/CSS/images while bounding the worst case.
+const MAX_BODY: usize = 32 * 1024 * 1024;
+/// Hard wall-clock deadline for reading one response body. Unlike the per-read
+/// socket timeout (which a slowloris resets on every dribbled byte), this bounds
+/// total time regardless of how the bytes are paced.
+const MAX_READ_TIME: Duration = Duration::from_secs(20);
 
 /// An HTTP response.
 #[derive(Clone, Debug)]
@@ -68,6 +77,9 @@ pub enum NetError {
     UnsupportedScheme,
     /// The URL lacked a usable host/port or a redirect target was invalid.
     BadUrl,
+    /// The host resolved to a non-public address (loopback / private / link-local
+    /// / etc.) — blocked as an SSRF defense.
+    BlockedHost,
 }
 
 impl std::fmt::Display for NetError {
@@ -79,6 +91,7 @@ impl std::fmt::Display for NetError {
             NetError::TooManyRedirects => f.write_str("too many redirects"),
             NetError::UnsupportedScheme => f.write_str("unsupported scheme (only http/https)"),
             NetError::BadUrl => f.write_str("invalid or unsupported URL"),
+            NetError::BlockedHost => f.write_str("blocked host (non-public address)"),
         }
     }
 }
@@ -171,23 +184,83 @@ fn fetch_once(url: &Url, cookie: Option<&str>) -> Result<Vec<u8>, NetError> {
 
 /// Connect with a bounded connect timeout and per-read/write timeouts so a slow
 /// or dead server can never hang the caller (e.g. the browser window) forever.
+///
+/// This is also the single SSRF chokepoint: it is reached by `fetch_once` for
+/// the initial URL *and* every redirect hop, so rejecting non-public addresses
+/// here closes the redirect-bypass too. All resolved addresses are inspected
+/// (defeating multi-A-record / DNS-rebinding tricks) and the connection is only
+/// made to a public one.
 fn connect(host: &str, port: u16) -> Result<TcpStream, NetError> {
-    let addr = (host, port)
-        .to_socket_addrs()?
-        .next()
-        .ok_or(NetError::BadUrl)?;
-    let sock = TcpStream::connect_timeout(&addr, Duration::from_secs(15))?;
-    sock.set_read_timeout(Some(Duration::from_secs(30)))?;
+    let addrs: Vec<SocketAddr> = (host, port).to_socket_addrs()?.collect();
+    if addrs.is_empty() {
+        return Err(NetError::BadUrl);
+    }
+    // If *any* resolved address is non-public, refuse — a hostile resolver could
+    // otherwise return one public and one internal address to slip past us.
+    if addrs.iter().any(|a| is_blocked_ip(a.ip())) {
+        return Err(NetError::BlockedHost);
+    }
+    let sock = TcpStream::connect_timeout(&addrs[0], Duration::from_secs(15))?;
+    sock.set_read_timeout(Some(Duration::from_secs(10)))?;
     sock.set_write_timeout(Some(Duration::from_secs(15)))?;
     Ok(sock)
+}
+
+/// Is `ip` a non-public address we must never connect to from page-controlled
+/// URLs? Covers loopback, private (RFC1918), link-local (incl. the cloud
+/// metadata endpoint 169.254.169.254), CGNAT, unspecified, broadcast, and the
+/// IPv6 equivalents (incl. IPv4-mapped forms).
+fn is_blocked_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || o[0] == 0
+                || (o[0] == 100 && (o[1] & 0xc0) == 0x40) // 100.64.0.0/10 CGNAT
+        }
+        IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_blocked_ip(IpAddr::V4(mapped));
+            }
+            let seg = v6.segments();
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (seg[0] & 0xfe00) == 0xfc00 // fc00::/7 unique-local
+                || (seg[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local
+        }
+    }
+}
+
+/// Read a response body, bounded by both [`MAX_BODY`] bytes and [`MAX_READ_TIME`]
+/// total wall-clock. A stalled or slow-dripping connection ends the read instead
+/// of hanging the caller; whatever was received so far is returned (a partial
+/// body is then parsed best-effort, as for an unclean `Connection: close`).
+fn read_body(reader: &mut impl Read) -> Vec<u8> {
+    let start = Instant::now();
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 64 * 1024];
+    while buf.len() < MAX_BODY && start.elapsed() < MAX_READ_TIME {
+        let want = (MAX_BODY - buf.len()).min(chunk.len());
+        match reader.read(&mut chunk[..want]) {
+            Ok(0) => break, // clean EOF
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            // A timed-out / stalled read or an unclean close: stop with what we
+            // have rather than erroring or looping.
+            Err(_) => break,
+        }
+    }
+    buf
 }
 
 fn fetch_plain(host: &str, port: u16, request: &[u8]) -> Result<Vec<u8>, NetError> {
     let mut sock = connect(host, port)?;
     sock.write_all(request)?;
-    let mut buf = Vec::new();
-    sock.read_to_end(&mut buf)?;
-    Ok(buf)
+    Ok(read_body(&mut sock))
 }
 
 fn fetch_tls(host: &str, port: u16, request: &[u8]) -> Result<Vec<u8>, NetError> {
@@ -209,14 +282,9 @@ fn fetch_tls(host: &str, port: u16, request: &[u8]) -> Result<Vec<u8>, NetError>
     let mut tls = rustls::Stream::new(&mut conn, &mut sock);
 
     tls.write_all(request)?;
-    let mut buf = Vec::new();
-    match tls.read_to_end(&mut buf) {
-        Ok(_) => Ok(buf),
-        // Many servers close the TLS session uncleanly after the body; that is
-        // not an error for a `Connection: close` fetch as long as we got data.
-        Err(e) if e.kind() == ErrorKind::UnexpectedEof && !buf.is_empty() => Ok(buf),
-        Err(e) => Err(NetError::Io(e)),
-    }
+    // `read_body` already tolerates an unclean TLS close (it stops on any read
+    // error and returns what arrived), so no special UnexpectedEof handling.
+    Ok(read_body(&mut tls))
 }
 
 #[cfg(test)]
@@ -227,6 +295,40 @@ mod tests {
     fn rejects_non_http_scheme() {
         let url = Url::parse("ftp://example.com/file").unwrap();
         assert!(matches!(fetch(&url), Err(NetError::UnsupportedScheme)));
+    }
+
+    #[test]
+    fn ssrf_filter_blocks_internal_addresses() {
+        let blocked = [
+            "127.0.0.1",
+            "10.0.0.1",
+            "192.168.1.1",
+            "172.16.0.1",
+            "169.254.169.254", // cloud metadata
+            "100.64.0.1",      // CGNAT
+            "0.0.0.0",
+            "::1",
+            "fc00::1",
+            "fe80::1",
+            "::ffff:127.0.0.1", // IPv4-mapped loopback
+        ];
+        for ip in blocked {
+            assert!(is_blocked_ip(ip.parse().unwrap()), "{ip} should be blocked");
+        }
+        let allowed = ["1.1.1.1", "8.8.8.8", "93.184.216.34", "2606:2800:220:1::1"];
+        for ip in allowed {
+            assert!(
+                !is_blocked_ip(ip.parse().unwrap()),
+                "{ip} should be allowed"
+            );
+        }
+    }
+
+    // Connecting to a loopback URL must be refused before any socket work.
+    #[test]
+    fn fetch_blocks_loopback_host() {
+        let url = Url::parse("http://127.0.0.1:9/").unwrap();
+        assert!(matches!(fetch(&url), Err(NetError::BlockedHost)));
     }
 
     // Live network fetch — ignored by default so CI stays hermetic. Run with:

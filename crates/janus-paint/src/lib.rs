@@ -113,10 +113,19 @@ pub fn canvas_size(root: &LayoutBox) -> PixelSize {
     PixelSize::new(w as u32, h as u32)
 }
 
+/// Upper bound on a rasterized canvas, in device pixels. A pathological page
+/// (e.g. many stacked tall images) must not be able to request an unbounded
+/// `Pixmap` allocation; above this, `render` declines rather than risking OOM.
+/// Generous enough for very long real pages (Wikipedia ≈ 35M px at 1×).
+const MAX_CANVAS_AREA: u64 = 200_000_000;
+
 /// Render a display list onto a fresh white pixmap of `size`, scaling all
 /// geometry by `scale` (use `scale > 1.0` for crisp HiDPI / device-pixel output).
 #[must_use]
 pub fn render(items: &[DisplayItem], size: PixelSize, scale: f32) -> Option<Pixmap> {
+    if size.area() > MAX_CANVAS_AREA {
+        return None;
+    }
     let mut pixmap = Pixmap::new(size.width.max(1), size.height.max(1))?;
     pixmap.fill(tiny_skia::Color::WHITE);
     let mut text = janus_text::TextContext::new();
@@ -237,7 +246,15 @@ fn paint_item(
 fn draw_image(pixmap: &mut Pixmap, dst: Rect, image: &RasterImage) {
     let (iw, ih) = (image.width, image.height);
     let expected = iw as usize * ih as usize * 4;
-    if iw == 0 || ih == 0 || dst.width <= 0.0 || dst.height <= 0.0 || image.rgba.len() < expected {
+    // Skip on zero/non-finite/over-large geometry, or an inconsistent buffer.
+    if iw == 0
+        || ih == 0
+        || !dst.width.is_finite()
+        || !dst.height.is_finite()
+        || dst.width <= 0.0
+        || dst.height <= 0.0
+        || image.rgba.len() < expected
+    {
         return;
     }
     let Some(mut src) = Pixmap::new(iw, ih) else {
@@ -378,6 +395,36 @@ mod tests {
         // Outside the box → background white.
         let bg = pixmap.pixel(1, 1).expect("pixel in bounds");
         assert_eq!((bg.red(), bg.green(), bg.blue()), (255, 255, 255));
+    }
+
+    #[test]
+    fn nonfinite_image_box_is_skipped_without_panic() {
+        let image = Arc::new(RasterImage {
+            width: 2,
+            height: 2,
+            rgba: vec![255; 2 * 2 * 4],
+        });
+        let item = DisplayItem::Image {
+            rect: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: f32::NAN,
+                height: 10.0,
+            },
+            image,
+        };
+        let pixmap = render(&[item], PixelSize::new(20, 20), 1.0).expect("pixmap");
+        // Image not drawn (NaN box) and no panic → canvas stays white.
+        let px = pixmap.pixel(1, 1).expect("pixel");
+        assert_eq!((px.red(), px.green(), px.blue()), (255, 255, 255));
+    }
+
+    #[test]
+    fn oversized_canvas_is_declined() {
+        // A pathological canvas must be refused rather than risk OOM…
+        assert!(render(&[], PixelSize::new(100_000, 100_000), 1.0).is_none());
+        // …while a normal (even very tall) canvas still renders.
+        assert!(render(&[], PixelSize::new(1200, 50_000), 1.0).is_some());
     }
 
     #[test]
