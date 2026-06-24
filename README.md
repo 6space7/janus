@@ -18,13 +18,18 @@ streaming**.
 > **both** a PNG (human view) and a ref-tagged, box-grounded semantic snapshot (agent
 > view) from one layout pass. An MCP server (`janus-mcp`) exposes `navigate` / `snapshot`
 > / `extract_text` / `click` / `find` / `screenshot` so an LLM can drive it. The human PNG
-> renders real glyphs (system fonts via cosmic-text). Still to come: JS (`janus-js` / V8),
-> sandboxing (`janus-sandbox`), and the windowed shell (`janus-shell`). See the project
+> renders real glyphs (system fonts via cosmic-text), and `janus-shell` is a real desktop
+> window (render + scroll + click-to-navigate). Still to come: JS (`janus-js` / V8), a URL
+> bar + history, and sandboxing (`janus-sandbox`). See the project
 > plan for the full roadmap.
 
 Try it:
 
 ```sh
+# Open the desktop browser: a window that renders the page, scrolls,
+# and follows links you click.
+cargo run -p janus-shell -- https://example.com/
+
 # Fetch a live site → PNG + agent snapshot (one layout pass, two painters)
 cargo run -p janus-cli -- https://example.com/ --out page.png
 
@@ -77,7 +82,7 @@ Status legend: ✅ working · 🟡 partial · ⬜ stub.
 | `janus-text` | Real text: system fonts + shaping + glyph raster (cosmic-text) | 🟡 |
 | `janus-js` | V8 host: rooting bridge + WebIDL DOM bindings | ⬜ |
 | `janus-sandbox` | Multi-process isolation + OS sandbox policy | ⬜ |
-| `janus-shell` | Human shell: window, engine-drawn chrome, AccessKit graft | ⬜ |
+| `janus-shell` | Desktop window: render + scroll + click-to-navigate (winit/softbuffer) | 🟡 |
 
 ## Quickstart
 

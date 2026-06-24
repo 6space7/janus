@@ -39,6 +39,9 @@ rustc-hash = "2"
 tiny-skia = "0.11"
 # Real text: system-font discovery + rustybuzz shaping + swash rasterization.
 cosmic-text = "0.12"
+# Desktop shell: OS window + CPU framebuffer present.
+winit = "0.30"
+softbuffer = "0.4"
 # TLS records via rustls with the `ring` provider (no cmake/aws-lc dependency).
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "0.26"

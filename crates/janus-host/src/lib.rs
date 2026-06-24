@@ -77,6 +77,34 @@ impl Page {
             out
         }
     }
+
+    /// The resolved link URL at page coordinate `(x, y)`, if a link's box covers
+    /// it. Picks the smallest (most specific) matching box. Used by the shell
+    /// for click-to-navigate.
+    #[must_use]
+    pub fn link_at(&self, x: f32, y: f32) -> Option<String> {
+        let tree = janus_sem::build_snapshot(&self.dom, &self.styles, &self.layout);
+        let mut best: Option<(String, i64)> = None;
+        link_at_point(&tree, x, y, &mut best);
+        best.and_then(|(ref_id, _)| self.resolve_link(&ref_id))
+    }
+}
+
+fn link_at_point(node: &janus_sem::SemanticNode, x: f32, y: f32, best: &mut Option<(String, i64)>) {
+    if node.href.is_some() {
+        if let Some(g) = node.geometry {
+            let (xi, yi) = (x as i32, y as i32);
+            if xi >= g.x && xi < g.x + g.width && yi >= g.y && yi < g.y + g.height {
+                let area = i64::from(g.width) * i64::from(g.height);
+                if best.as_ref().is_none_or(|(_, a)| area < *a) {
+                    *best = Some((node.ref_id.clone(), area));
+                }
+            }
+        }
+    }
+    for child in &node.children {
+        link_at_point(child, x, y, best);
+    }
 }
 
 fn collect_matches(

@@ -9,4 +9,13 @@ description = "The human browser shell: a winit window, engine-drawn chrome, and
 [lints]
 workspace = true
 
+[[bin]]
+name = "janus"
+path = "src/main.rs"
+
 [dependencies]
+janus-host.workspace = true
+janus-paint.workspace = true
+tiny-skia.workspace = true
+winit.workspace = true
+softbuffer.workspace = true
