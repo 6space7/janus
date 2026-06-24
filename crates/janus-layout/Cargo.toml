@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 janus-dom.workspace = true
 janus-style.workspace = true
+janus-traits.workspace = true
 
 [dev-dependencies]
 janus-html.workspace = true

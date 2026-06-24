@@ -10,12 +10,20 @@
 //! `janus-agent` (the MCP semantic surface) both build a [`Page`] here, so the
 //! pipeline lives in exactly one place.
 
+use std::sync::Arc;
+
+use base64::Engine;
 use janus_bytes::Url;
 use janus_dom::{Dom, NodeData, NodeId};
-use janus_layout::LayoutBox;
+use janus_layout::{ImageStore, LayoutBox};
 use janus_style::{Display, StyleMap};
+use janus_traits::RasterImage;
 
 pub use janus_net::CookieJar;
+
+/// Cap on images fetched/decoded per page (a guard against a hostile page with
+/// thousands of `<img>` tags exhausting time/memory).
+const MAX_IMAGES: usize = 100;
 
 /// A fully processed page: one layout pass, ready for either painter.
 #[derive(Debug)]
@@ -28,6 +36,9 @@ pub struct Page {
     pub layout: LayoutBox,
     /// The document's base URL, if it was fetched from one.
     pub base_url: Option<Url>,
+    /// Decoded images keyed by their `<img>` node — reused on reflow so the
+    /// shell never re-fetches images just to re-lay-out at a new width.
+    pub images: ImageStore,
 }
 
 impl Page {
@@ -144,12 +155,14 @@ pub fn render_html(html: &str, base_url: Option<Url>, width: f32) -> Option<Page
     let dom = janus_html::parse(html);
     let css = gather_css(&dom, base_url.as_ref());
     let styles = janus_style::compute_styles(&dom, &janus_css::Stylesheet::parse(&css));
-    let layout = janus_layout::layout_document(&dom, &styles, width)?;
+    let images = gather_images(&dom, base_url.as_ref());
+    let layout = janus_layout::layout_document_with_images(&dom, &styles, width, &images)?;
     Some(Page {
         dom,
         styles,
         layout,
         base_url,
+        images,
     })
 }
 
@@ -211,6 +224,68 @@ fn gather_css_from(dom: &Dom, node: NodeId, base: Option<&Url>, out: &mut String
     }
     for &child in dom.children(node) {
         gather_css_from(dom, child, base, out);
+    }
+}
+
+/// Fetch + decode every `<img src>` reachable from the document, keyed by node.
+/// Network fetches only happen when a `base` is set (so `render_html` stays
+/// hermetic for local input); `data:` URIs are always decoded.
+fn gather_images(dom: &Dom, base: Option<&Url>) -> ImageStore {
+    let mut store = ImageStore::new();
+    collect_images(dom, dom.document(), base, &mut store);
+    store
+}
+
+fn collect_images(dom: &Dom, node: NodeId, base: Option<&Url>, store: &mut ImageStore) {
+    if store.len() >= MAX_IMAGES {
+        return;
+    }
+    if dom.element_name(node) == Some("img") {
+        if let Some(src) = dom.attr(node, "src") {
+            if let Some(image) = load_image(src, base) {
+                store.insert(node, Arc::new(image));
+            }
+        }
+    }
+    for &child in dom.children(node) {
+        collect_images(dom, child, base, store);
+    }
+}
+
+/// Load `src` (a `data:` URI, or an http(s) URL resolved against `base`) and
+/// decode it to straight-alpha RGBA8.
+fn load_image(src: &str, base: Option<&Url>) -> Option<RasterImage> {
+    let bytes = if let Some(rest) = src.strip_prefix("data:") {
+        decode_data_uri(rest)?
+    } else {
+        // No network without a base URL — keeps local rendering hermetic.
+        let resolved = base?.join(src).ok()?;
+        let resp = janus_net::fetch(&resolved).ok()?;
+        if !(200..300).contains(&resp.status) {
+            return None;
+        }
+        resp.body
+    };
+    let decoded = image::load_from_memory(&bytes).ok()?.to_rgba8();
+    let (width, height) = decoded.dimensions();
+    Some(RasterImage {
+        width,
+        height,
+        rgba: decoded.into_raw(),
+    })
+}
+
+/// Decode the part of a `data:` URI after the `data:` prefix
+/// (`[<mediatype>][;base64],<data>`).
+fn decode_data_uri(rest: &str) -> Option<Vec<u8>> {
+    let comma = rest.find(',')?;
+    let meta = &rest[..comma];
+    let data = &rest[comma + 1..];
+    if meta.split(';').any(|t| t.eq_ignore_ascii_case("base64")) {
+        base64::engine::general_purpose::STANDARD.decode(data).ok()
+    } else {
+        // Non-base64 image data URIs are vanishingly rare; take the bytes as-is.
+        Some(data.as_bytes().to_vec())
     }
 }
 
@@ -289,6 +364,45 @@ mod tests {
     #[test]
     fn empty_document_renders_nothing() {
         assert!(render_html("", None, 800.0).is_none());
+    }
+
+    #[test]
+    fn decodes_and_lays_out_data_uri_image() {
+        // Encode a real 3×2 PNG with the codec, embed it as a base64 data: URI,
+        // and confirm the full path: data-URI parse → decode → sized image box.
+        let img = image::RgbaImage::from_pixel(3, 2, image::Rgba([255, 0, 0, 255]));
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(png.get_ref());
+        let html = format!("<html><body><img src=\"data:image/png;base64,{b64}\"></body></html>");
+
+        let page = render_html(&html, None, 800.0).expect("page");
+        assert_eq!(page.images.len(), 1, "the data-URI image should decode");
+
+        let mut sized = None;
+        page.layout.for_each(&mut |b| {
+            if b.image.is_some() {
+                sized = Some(b.rect);
+            }
+        });
+        let rect = sized.expect("an image box");
+        // No width/height attrs → intrinsic 3×2.
+        assert!((rect.width - 3.0).abs() < 0.01, "width {}", rect.width);
+        assert!((rect.height - 2.0).abs() < 0.01, "height {}", rect.height);
+    }
+
+    #[test]
+    fn undecodable_image_is_skipped() {
+        let page = render_html(
+            "<html><body><img src=\"data:image/png;base64,not-valid\"><p>hi</p></body></html>",
+            None,
+            800.0,
+        )
+        .expect("page");
+        assert_eq!(page.images.len(), 0);
+        assert_eq!(page.extract_text(), "hi");
     }
 
     #[test]

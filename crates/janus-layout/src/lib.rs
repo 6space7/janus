@@ -13,10 +13,19 @@
 //! until layout consumes `janus-text`'s real metrics. Floats, grid, multi-line
 //! flex/shrink, positioning, and stacking contexts are the next layer.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use janus_dom::{Dom, NodeData, NodeId};
 use janus_style::{
     AlignItems, Color, ComputedStyle, Display, Edges, JustifyContent, Length, StyleMap,
 };
+use janus_traits::RasterImage;
+
+/// Decoded images, keyed by the `<img>` element node that referenced them. The
+/// host fetches + decodes (network and the `image` codec live there); layout
+/// only consumes the pixels, so it stays hermetic and codec-free.
+pub type ImageStore = HashMap<NodeId, Arc<RasterImage>>;
 
 /// An axis-aligned rectangle in CSS pixels (top-left origin).
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -54,6 +63,8 @@ pub struct LayoutBox {
     pub font_size: f32,
     /// Text content, for a text-fragment box.
     pub text: Option<String>,
+    /// Decoded image to blit into `rect`, for a replaced (`<img>`) box.
+    pub image: Option<Arc<RasterImage>>,
     /// Child boxes.
     pub children: Vec<LayoutBox>,
 }
@@ -68,21 +79,42 @@ impl LayoutBox {
     }
 }
 
-/// Lay out the document at `viewport_width`, returning the root box (the root
-/// element, usually `<html>`), or `None` if there is no rendered root.
+/// Lay out the document at `viewport_width` with no images.
 #[must_use]
 pub fn layout_document(dom: &Dom, styles: &StyleMap, viewport_width: f32) -> Option<LayoutBox> {
+    layout_document_with_images(dom, styles, viewport_width, &ImageStore::new())
+}
+
+/// Lay out the document at `viewport_width`, blitting any decoded `images` into
+/// their `<img>` boxes. Returns the root box (the root element, usually
+/// `<html>`), or `None` if there is no rendered root.
+#[must_use]
+pub fn layout_document_with_images(
+    dom: &Dom,
+    styles: &StyleMap,
+    viewport_width: f32,
+    images: &ImageStore,
+) -> Option<LayoutBox> {
     let root = dom
         .children(dom.document())
         .iter()
         .copied()
         .find(|&n| styles.contains_key(&n))?;
     let initial = ComputedStyle::initial();
-    let tree = build(dom, styles, root, &initial).into_iter().next()?;
+    let tree = build(dom, styles, root, &initial, images)
+        .into_iter()
+        .next()?;
     Some(layout_block(&tree, viewport_width, 0.0, 0.0))
 }
 
 // --- box-tree construction ----------------------------------------------------
+
+/// A replaced element's resolved display size and decoded pixels (`<img>`).
+struct Replaced {
+    width: f32,
+    height: f32,
+    image: Arc<RasterImage>,
+}
 
 struct BuildBox {
     node: Option<NodeId>,
@@ -90,6 +122,7 @@ struct BuildBox {
     flex: bool,
     style: ComputedStyle,
     text: Option<String>,
+    replaced: Option<Replaced>,
     children: Vec<BuildBox>,
 }
 
@@ -98,6 +131,7 @@ fn build(
     styles: &StyleMap,
     node: NodeId,
     parent_style: &ComputedStyle,
+    images: &ImageStore,
 ) -> Vec<BuildBox> {
     let Some(node_ref) = dom.node(node) else {
         return Vec::new();
@@ -110,11 +144,34 @@ fn build(
             if style.display == Display::None {
                 return Vec::new();
             }
+            // A replaced `<img>` with decoded pixels is an inline-atomic leaf
+            // sized from its width/height attrs and intrinsic aspect ratio.
+            if dom.element_name(node) == Some("img") {
+                return match images.get(&node) {
+                    Some(image) => {
+                        let (width, height) = image_size(dom, node, image);
+                        vec![BuildBox {
+                            node: Some(node),
+                            block: false,
+                            flex: false,
+                            style: style.clone(),
+                            text: None,
+                            replaced: Some(Replaced {
+                                width,
+                                height,
+                                image: image.clone(),
+                            }),
+                            children: Vec::new(),
+                        }]
+                    }
+                    None => Vec::new(), // undecoded image: render nothing
+                };
+            }
             let block = style.display != Display::Inline;
             let flex = style.display == Display::Flex;
             let mut children = Vec::new();
             for &child in dom.children(node) {
-                children.extend(build(dom, styles, child, style));
+                children.extend(build(dom, styles, child, style, images));
             }
             if block {
                 children = wrap_inline_runs(children, style);
@@ -125,6 +182,7 @@ fn build(
                 flex,
                 style: style.clone(),
                 text: None,
+                replaced: None,
                 children,
             }]
         }
@@ -139,10 +197,38 @@ fn build(
                 flex: false,
                 style: parent_style.clone(),
                 text: Some(collapsed),
+                replaced: None,
                 children: Vec::new(),
             }]
         }
         _ => Vec::new(),
+    }
+}
+
+/// The display size of an `<img>`: `width`/`height` attributes when present,
+/// otherwise the intrinsic size; a single specified dimension scales the other
+/// by the intrinsic aspect ratio.
+fn image_size(dom: &Dom, node: NodeId, image: &RasterImage) -> (f32, f32) {
+    let iw = image.width as f32;
+    let ih = image.height as f32;
+    let aw = dom.attr(node, "width").and_then(parse_dim);
+    let ah = dom.attr(node, "height").and_then(parse_dim);
+    match (aw, ah) {
+        (Some(w), Some(h)) => (w, h),
+        (Some(w), None) => (w, if iw > 0.0 { w * ih / iw } else { ih }),
+        (None, Some(h)) => (if ih > 0.0 { h * iw / ih } else { iw }, h),
+        (None, None) => (iw, ih),
+    }
+}
+
+/// Parse an HTML length attribute (a leading non-negative integer; trailing
+/// `px`/`%` and other junk are ignored — `%` sizing isn't resolved here).
+fn parse_dim(s: &str) -> Option<f32> {
+    let digits: String = s.trim().chars().take_while(char::is_ascii_digit).collect();
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse::<f32>().ok()
     }
 }
 
@@ -186,6 +272,7 @@ fn anonymous_block(children: Vec<BuildBox>, parent_style: &ComputedStyle) -> Bui
         flex: false,
         style,
         text: None,
+        replaced: None,
         children,
     }
 }
@@ -280,6 +367,7 @@ fn layout_block_sized(
         text_color: b.style.color,
         font_size: fs,
         text: None,
+        image: None,
         children,
     }
 }
@@ -416,9 +504,80 @@ fn layout_inline(
     let mut line_height = 0.0f32;
 
     for fragment in fragments {
-        let advance = fragment.word.chars().count() as f32 * 0.5 * fragment.font_size;
-        let lh = 1.2 * fragment.font_size;
-        let space = 0.5 * fragment.font_size;
+        let node = fragment.node;
+        // Per-fragment advance, line height, trailing space, and the box to emit.
+        let (advance, lh, space, mut laid) = match fragment.kind {
+            FragKind::Word {
+                text,
+                color,
+                font_size,
+            } => {
+                let advance = text.chars().count() as f32 * 0.5 * font_size;
+                let lh = 1.2 * font_size;
+                (
+                    advance,
+                    lh,
+                    0.5 * font_size,
+                    LayoutBox {
+                        node,
+                        rect: Rect {
+                            x: 0.0,
+                            y: 0.0,
+                            width: advance,
+                            height: lh,
+                        },
+                        margin: Edges::all(0.0),
+                        padding: Edges::all(0.0),
+                        border: Edges::all(0.0),
+                        background_color: Color::TRANSPARENT,
+                        border_color: Color::TRANSPARENT,
+                        text_color: color,
+                        font_size,
+                        text: Some(text),
+                        image: None,
+                        children: Vec::new(),
+                    },
+                )
+            }
+            FragKind::Image {
+                mut width,
+                mut height,
+                image,
+            } => {
+                // Emulate the ubiquitous `img { max-width: 100% }`: clamp an
+                // over-wide image to the container, preserving aspect ratio, so
+                // a huge source can't blow up the canvas or overflow the page.
+                if width > content_width && content_width > 0.0 && width > 0.0 {
+                    let s = content_width / width;
+                    width *= s;
+                    height *= s;
+                }
+                (
+                    width,
+                    height,
+                    0.0,
+                    LayoutBox {
+                        node,
+                        rect: Rect {
+                            x: 0.0,
+                            y: 0.0,
+                            width,
+                            height,
+                        },
+                        margin: Edges::all(0.0),
+                        padding: Edges::all(0.0),
+                        border: Edges::all(0.0),
+                        background_color: Color::TRANSPARENT,
+                        border_color: Color::TRANSPARENT,
+                        text_color: Color::TRANSPARENT,
+                        font_size: 0.0,
+                        text: None,
+                        image: Some(image),
+                        children: Vec::new(),
+                    },
+                )
+            }
+        };
 
         if cursor_x > content_x && cursor_x + advance > right {
             cursor_x = content_x;
@@ -426,28 +585,13 @@ fn layout_inline(
             line_height = 0.0;
         }
 
-        // An unbreakable word wider than the line overflows visually (CSS
+        // An unbreakable fragment wider than the line overflows visually (CSS
         // `overflow: visible`), but keep the *reported* box within the
         // container so agent geometry never points outside the page.
-        let reported_width = advance.min((right - cursor_x).max(0.0));
-        boxes.push(LayoutBox {
-            node: fragment.node,
-            rect: Rect {
-                x: cursor_x,
-                y: cursor_y,
-                width: reported_width,
-                height: lh,
-            },
-            margin: Edges::all(0.0),
-            padding: Edges::all(0.0),
-            border: Edges::all(0.0),
-            background_color: Color::TRANSPARENT,
-            border_color: Color::TRANSPARENT,
-            text_color: fragment.color,
-            font_size: fragment.font_size,
-            text: Some(fragment.word),
-            children: Vec::new(),
-        });
+        laid.rect.x = cursor_x;
+        laid.rect.y = cursor_y;
+        laid.rect.width = laid.rect.width.min((right - cursor_x).max(0.0));
+        boxes.push(laid);
 
         cursor_x += advance + space;
         line_height = line_height.max(lh);
@@ -462,20 +606,42 @@ fn layout_inline(
 }
 
 struct Fragment {
-    word: String,
-    color: Color,
-    font_size: f32,
+    kind: FragKind,
     node: Option<NodeId>,
+}
+
+enum FragKind {
+    Word {
+        text: String,
+        color: Color,
+        font_size: f32,
+    },
+    Image {
+        width: f32,
+        height: f32,
+        image: Arc<RasterImage>,
+    },
 }
 
 fn collect_fragments(children: &[BuildBox], out: &mut Vec<Fragment>) {
     for child in children {
-        if let Some(text) = &child.text {
+        if let Some(r) = &child.replaced {
+            out.push(Fragment {
+                kind: FragKind::Image {
+                    width: r.width,
+                    height: r.height,
+                    image: r.image.clone(),
+                },
+                node: child.node,
+            });
+        } else if let Some(text) = &child.text {
             for word in text.split_whitespace() {
                 out.push(Fragment {
-                    word: word.to_string(),
-                    color: child.style.color,
-                    font_size: child.style.font_size,
+                    kind: FragKind::Word {
+                        text: word.to_string(),
+                        color: child.style.color,
+                        font_size: child.style.font_size,
+                    },
                     node: child.node,
                 });
             }
@@ -612,6 +778,62 @@ mod tests {
             "fragment {:?} escapes container",
             frag.rect
         );
+    }
+
+    fn find_img(dom: &Dom, node: NodeId) -> Option<NodeId> {
+        if dom.element_name(node) == Some("img") {
+            return Some(node);
+        }
+        dom.children(node).iter().find_map(|&c| find_img(dom, c))
+    }
+
+    fn image_box(html: &str, width: f32, img: RasterImage) -> LayoutBox {
+        let dom = janus_html::parse(html);
+        let styles = janus_style::compute_styles(&dom, &Stylesheet::default());
+        let node = find_img(&dom, dom.document()).expect("an <img> node");
+        let mut images = ImageStore::new();
+        images.insert(node, Arc::new(img));
+        let root = layout_document_with_images(&dom, &styles, width, &images).expect("root");
+        let mut found = None;
+        root.for_each(&mut |b| {
+            if b.image.is_some() {
+                found = Some(b.clone());
+            }
+        });
+        found.expect("an image box")
+    }
+
+    #[test]
+    fn img_width_attr_scales_height_by_aspect_ratio() {
+        // 20×10 intrinsic, width=40 attr → height scales to 20.
+        let b = image_box(
+            "<html><body><img width=\"40\"></body></html>",
+            800.0,
+            RasterImage {
+                width: 20,
+                height: 10,
+                rgba: vec![0; 20 * 10 * 4],
+            },
+        );
+        assert!((b.rect.width - 40.0).abs() < 0.01, "w {}", b.rect.width);
+        assert!((b.rect.height - 20.0).abs() < 0.01, "h {}", b.rect.height);
+    }
+
+    #[test]
+    fn over_wide_image_clamped_to_container_preserving_aspect() {
+        // 2000×1000 intrinsic in a 200px viewport (body content width 184) →
+        // clamped to 184 wide, height scaled to keep the 2:1 ratio (92).
+        let b = image_box(
+            "<html><body><img></body></html>",
+            200.0,
+            RasterImage {
+                width: 2000,
+                height: 1000,
+                rgba: Vec::new(),
+            },
+        );
+        assert!((b.rect.width - 184.0).abs() < 0.5, "w {}", b.rect.width);
+        assert!((b.rect.height - 92.0).abs() < 0.5, "h {}", b.rect.height);
     }
 
     #[test]

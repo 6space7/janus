@@ -73,10 +73,10 @@ Status legend: ✅ working · 🟡 partial · ⬜ stub.
 | `janus-dom` | Arena-backed DOM node store | ✅ |
 | `janus-css` | CSS parser → selectors, specificity, declarations | 🟡 |
 | `janus-style` | Selector matching, the cascade, inheritance → computed styles | 🟡 |
-| `janus-layout` | Block + inline + row flexbox → positioned box tree (geometry) | 🟡 |
-| `janus-paint` | Display list + `tiny-skia` → PNG, with real glyphs via `janus-text` | 🟡 |
+| `janus-layout` | Block + inline + row flexbox + replaced `<img>` → positioned box tree (geometry) | 🟡 |
+| `janus-paint` | Display list + `tiny-skia` → PNG, with real glyphs (`janus-text`) and image blitting | 🟡 |
 | `janus-sem` | The Semantic Surface: roles, names, geometry, stable IDs, href | 🟡 |
-| `janus-host` | Pipeline orchestrator: `render_html`/`render_url` + external CSS | ✅ |
+| `janus-host` | Pipeline orchestrator: `render_html`/`render_url` + external CSS + images | ✅ |
 | `janus-agent` | MCP server (`navigate`/`snapshot`/`extract_text`/`click`) | 🟡 |
 | `janus-cli` | `janus-shot`: URL/HTML → PNG + semantic snapshot | ✅ |
 | `janus-text` | Real text: system fonts + shaping + glyph raster (cosmic-text) | 🟡 |

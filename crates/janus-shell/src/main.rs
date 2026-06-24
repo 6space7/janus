@@ -113,7 +113,12 @@ impl Janus {
     /// Re-layout the loaded page at a new width without refetching.
     fn reflow(&mut self, ctx: &egui::Context, width: f32) {
         if let Some(page) = &mut self.page {
-            if let Some(layout) = janus_layout::layout_document(&page.dom, &page.styles, width) {
+            if let Some(layout) = janus_layout::layout_document_with_images(
+                &page.dom,
+                &page.styles,
+                width,
+                &page.images,
+            ) {
                 page.layout = layout;
                 if let Some(pm) = janus_paint::paint_scaled(&page.layout, ctx.pixels_per_point()) {
                     let size = [pm.width() as usize, pm.height() as usize];

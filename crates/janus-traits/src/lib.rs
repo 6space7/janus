@@ -44,6 +44,35 @@ pub struct Rgba8 {
     pub a: u8,
 }
 
+/// A decoded raster image in straight-alpha RGBA8, row-major
+/// (`width * height * 4` bytes).
+///
+/// This is the output of an image *codec* — part of the reused primitives floor
+/// — carried from the host (which fetches and decodes) through `janus-layout`
+/// (which sizes the replaced box) to `janus-paint` (which blits it). Defining it
+/// here, behind no codec dependency, keeps layout free of the `image` crate so
+/// the same decoded pixels feed the human painter and the agent's geometry.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RasterImage {
+    /// Image width in pixels.
+    pub width: u32,
+    /// Image height in pixels.
+    pub height: u32,
+    /// Row-major straight-alpha RGBA8 pixels (`width * height * 4` bytes).
+    pub rgba: Vec<u8>,
+}
+
+impl std::fmt::Debug for RasterImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never dump the pixel buffer; report its size instead.
+        f.debug_struct("RasterImage")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("bytes", &self.rgba.len())
+            .finish()
+    }
+}
+
 /// A backend that turns a display list into pixels.
 ///
 /// Implemented over `tiny-skia` first (deterministic, CPU — the reference for

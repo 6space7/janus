@@ -13,9 +13,11 @@
 //! backend (`wgpu`+`vello`) slots in behind the same display list later; the
 //! list is built layer-friendly (painter's order, parent before child).
 
+use std::sync::Arc;
+
 use janus_layout::{LayoutBox, Rect};
 use janus_style::{Color, Edges};
-use janus_traits::PixelSize;
+use janus_traits::{PixelSize, RasterImage};
 use tiny_skia::{Paint, Pixmap, Transform};
 
 /// One drawing command in painter's order.
@@ -49,6 +51,13 @@ pub enum DisplayItem {
         /// Font size in px.
         font_size: f32,
     },
+    /// A decoded image blitted (scaled) into `rect` — a replaced `<img>` box.
+    Image {
+        /// The destination box, in CSS px.
+        rect: Rect,
+        /// The decoded pixels (straight-alpha RGBA8).
+        image: Arc<RasterImage>,
+    },
 }
 
 /// Build the display list for a laid-out tree, in painter's order (each box's
@@ -68,6 +77,12 @@ pub fn build_display_list(root: &LayoutBox) -> Vec<DisplayItem> {
                 rect: b.rect,
                 widths: b.border,
                 color: b.border_color,
+            });
+        }
+        if let Some(image) = &b.image {
+            items.push(DisplayItem::Image {
+                rect: b.rect,
+                image: image.clone(),
             });
         }
         if let Some(text) = &b.text {
@@ -212,7 +227,48 @@ fn paint_item(
                 (color.r, color.g, color.b, color.a),
             );
         }
+        DisplayItem::Image { rect, image } => draw_image(pixmap, scaled(*rect, scale), image),
     }
+}
+
+/// Blit `image` (straight-alpha RGBA8) into the device-space `dst` rect,
+/// scaling with bilinear sampling. Builds a premultiplied source pixmap once and
+/// lets `tiny-skia` do the resampling transform.
+fn draw_image(pixmap: &mut Pixmap, dst: Rect, image: &RasterImage) {
+    let (iw, ih) = (image.width, image.height);
+    let expected = iw as usize * ih as usize * 4;
+    if iw == 0 || ih == 0 || dst.width <= 0.0 || dst.height <= 0.0 || image.rgba.len() < expected {
+        return;
+    }
+    let Some(mut src) = Pixmap::new(iw, ih) else {
+        return;
+    };
+    for (i, px) in src.pixels_mut().iter_mut().enumerate() {
+        let o = i * 4;
+        let (r, g, b, a) = (
+            image.rgba[o],
+            image.rgba[o + 1],
+            image.rgba[o + 2],
+            image.rgba[o + 3],
+        );
+        // tiny-skia stores premultiplied alpha; the codec gives straight alpha.
+        *px =
+            tiny_skia::PremultipliedColorU8::from_rgba(premul(r, a), premul(g, a), premul(b, a), a)
+                .unwrap_or(tiny_skia::PremultipliedColorU8::TRANSPARENT);
+    }
+    let sx = dst.width / iw as f32;
+    let sy = dst.height / ih as f32;
+    let transform = Transform::from_row(sx, 0.0, 0.0, sy, dst.x, dst.y);
+    let paint = tiny_skia::PixmapPaint {
+        quality: tiny_skia::FilterQuality::Bilinear,
+        ..Default::default()
+    };
+    pixmap.draw_pixmap(0, 0, src.as_ref(), &paint, transform, None);
+}
+
+/// Premultiply one straight-alpha channel value by alpha (rounded).
+fn premul(c: u8, a: u8) -> u8 {
+    ((u16::from(c) * u16::from(a) + 127) / 255) as u8
 }
 
 fn scaled(r: Rect, s: f32) -> Rect {
@@ -295,6 +351,32 @@ mod tests {
         assert_eq!((px.red(), px.green(), px.blue()), (255, 0, 0));
         // A pixel to the right of the div (still on the page) stays white.
         let bg = pixmap.pixel(150, 20).expect("pixel in bounds");
+        assert_eq!((bg.red(), bg.green(), bg.blue()), (255, 255, 255));
+    }
+
+    #[test]
+    fn blits_image_scaled_into_box() {
+        // A 1×1 opaque-blue source scaled into a 10×10 box at (5,5).
+        let image = Arc::new(RasterImage {
+            width: 1,
+            height: 1,
+            rgba: vec![0, 0, 255, 255],
+        });
+        let item = DisplayItem::Image {
+            rect: Rect {
+                x: 5.0,
+                y: 5.0,
+                width: 10.0,
+                height: 10.0,
+            },
+            image,
+        };
+        let pixmap = render(&[item], PixelSize::new(40, 40), 1.0).expect("pixmap");
+        // Inside the box → blue.
+        let px = pixmap.pixel(10, 10).expect("pixel in bounds");
+        assert_eq!((px.red(), px.green(), px.blue()), (0, 0, 255));
+        // Outside the box → background white.
+        let bg = pixmap.pixel(1, 1).expect("pixel in bounds");
         assert_eq!((bg.red(), bg.green(), bg.blue()), (255, 255, 255));
     }
 
