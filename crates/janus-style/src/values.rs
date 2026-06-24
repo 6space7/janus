@@ -167,7 +167,60 @@ pub fn parse_color(input: &str) -> Option<Color> {
     if let Some(inner) = lower.strip_prefix("rgb").and_then(|r| paren_inner(r)) {
         return parse_rgb(inner, false);
     }
+    if let Some(inner) = lower
+        .strip_prefix("hsla")
+        .and_then(paren_inner)
+        .or_else(|| lower.strip_prefix("hsl").and_then(paren_inner))
+    {
+        return parse_hsl(inner);
+    }
     named_color(&lower)
+}
+
+/// Parse `hsl(h, s%, l%[, a])` / `hsla(…)` and the space-separated `/ alpha`
+/// form, returning an RGBA color.
+fn parse_hsl(inner: &str) -> Option<Color> {
+    let parts: Vec<&str> = inner
+        .split(|c: char| c == ',' || c == '/' || c.is_whitespace())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    let h = parts[0].trim_end_matches("deg").parse::<f32>().ok()?;
+    let s = parts[1].trim_end_matches('%').parse::<f32>().ok()? / 100.0;
+    let l = parts[2].trim_end_matches('%').parse::<f32>().ok()? / 100.0;
+    let a = match parts.get(3) {
+        Some(av) if av.ends_with('%') => av.trim_end_matches('%').parse::<f32>().ok()? / 100.0,
+        Some(av) => av.parse::<f32>().ok()?,
+        None => 1.0,
+    };
+    let (r, g, b) = hsl_to_rgb(h, s.clamp(0.0, 1.0), l.clamp(0.0, 1.0));
+    Some(Color {
+        r,
+        g,
+        b,
+        a: (a.clamp(0.0, 1.0) * 255.0).round() as u8,
+    })
+}
+
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
+    let h = ((h % 360.0) + 360.0) % 360.0;
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let hp = h / 60.0;
+    let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
+    let (r1, g1, b1) = match hp as i32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c / 2.0;
+    let to_u8 = |v: f32| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    (to_u8(r1), to_u8(g1), to_u8(b1))
 }
 
 fn paren_inner(s: &str) -> Option<&str> {
@@ -239,6 +292,48 @@ fn named_color(name: &str) -> Option<Color> {
         "lime" => Color::rgb(0, 255, 0),
         "yellow" => Color::rgb(255, 255, 0),
         "orange" => Color::rgb(255, 165, 0),
+        // Greys.
+        "lightgray" | "lightgrey" => Color::rgb(211, 211, 211),
+        "darkgray" | "darkgrey" => Color::rgb(169, 169, 169),
+        "dimgray" | "dimgrey" => Color::rgb(105, 105, 105),
+        "slategray" | "slategrey" => Color::rgb(112, 128, 144),
+        "gainsboro" => Color::rgb(220, 220, 220),
+        "whitesmoke" => Color::rgb(245, 245, 245),
+        // Reds / pinks.
+        "crimson" => Color::rgb(220, 20, 60),
+        "darkred" => Color::rgb(139, 0, 0),
+        "tomato" => Color::rgb(255, 99, 71),
+        "coral" => Color::rgb(255, 127, 80),
+        "salmon" => Color::rgb(250, 128, 114),
+        "pink" => Color::rgb(255, 192, 203),
+        "hotpink" => Color::rgb(255, 105, 180),
+        "brown" => Color::rgb(165, 42, 42),
+        "chocolate" => Color::rgb(210, 105, 30),
+        "tan" => Color::rgb(210, 180, 140),
+        "gold" => Color::rgb(255, 215, 0),
+        "khaki" => Color::rgb(240, 230, 140),
+        "beige" => Color::rgb(245, 245, 220),
+        "ivory" => Color::rgb(255, 255, 240),
+        // Purples.
+        "indigo" => Color::rgb(75, 0, 130),
+        "violet" => Color::rgb(238, 130, 238),
+        "plum" => Color::rgb(221, 160, 221),
+        "orchid" => Color::rgb(218, 112, 214),
+        "lavender" => Color::rgb(230, 230, 250),
+        // Greens.
+        "darkgreen" => Color::rgb(0, 100, 0),
+        "forestgreen" => Color::rgb(34, 139, 34),
+        "seagreen" => Color::rgb(46, 139, 87),
+        "limegreen" => Color::rgb(50, 205, 50),
+        "turquoise" => Color::rgb(64, 224, 208),
+        // Blues.
+        "darkblue" => Color::rgb(0, 0, 139),
+        "midnightblue" => Color::rgb(25, 25, 112),
+        "royalblue" => Color::rgb(65, 105, 225),
+        "steelblue" => Color::rgb(70, 130, 180),
+        "dodgerblue" => Color::rgb(30, 144, 255),
+        "skyblue" => Color::rgb(135, 206, 235),
+        "lightblue" => Color::rgb(173, 216, 230),
         _ => return None,
     };
     Some(c)
@@ -312,6 +407,47 @@ mod tests {
         );
         assert_eq!(parse_color("RebeccaPurple"), None); // not in the curated set
         assert_eq!(parse_color(" navy "), Some(Color::rgb(0, 0, 128)));
+    }
+
+    #[test]
+    fn hsl_colors() {
+        // hsl(0,100%,50%) is pure red.
+        assert_eq!(
+            parse_color("hsl(0, 100%, 50%)"),
+            Some(Color::rgb(255, 0, 0))
+        );
+        // hsl(120,100%,50%) is pure green; 240 is blue.
+        assert_eq!(
+            parse_color("hsl(120, 100%, 50%)"),
+            Some(Color::rgb(0, 255, 0))
+        );
+        assert_eq!(
+            parse_color("hsl(240 100% 50%)"),
+            Some(Color::rgb(0, 0, 255))
+        );
+        // 0% saturation → grey at the given lightness.
+        assert_eq!(
+            parse_color("hsl(0, 0%, 50%)"),
+            Some(Color::rgb(128, 128, 128))
+        );
+        // alpha via the slash form.
+        assert_eq!(
+            parse_color("hsl(0 100% 50% / 0.5)"),
+            Some(Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 128
+            })
+        );
+    }
+
+    #[test]
+    fn extended_named_colors() {
+        assert_eq!(parse_color("gold"), Some(Color::rgb(255, 215, 0)));
+        assert_eq!(parse_color("LightGray"), Some(Color::rgb(211, 211, 211)));
+        assert_eq!(parse_color("steelblue"), Some(Color::rgb(70, 130, 180)));
+        assert_eq!(parse_color("crimson"), Some(Color::rgb(220, 20, 60)));
     }
 
     #[test]
