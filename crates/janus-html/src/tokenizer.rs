@@ -239,7 +239,9 @@ impl Tokenizer {
         } else if self.matches_ignore_case(2, "doctype") {
             self.consume_doctype();
         } else {
-            self.pos += 1; // step onto '!'; rest is a bogus comment
+            // Incorrectly-opened comment: skip the whole `<!` introducer so it
+            // is not included in the bogus comment's data (per the HTML spec).
+            self.pos += 2;
             self.consume_bogus_comment();
         }
     }
@@ -481,6 +483,14 @@ mod tests {
         );
         assert_eq!(toks[1], Token::Comment(" hi ".into()));
         assert_eq!(toks[2].tag_name(), Some("p"));
+    }
+
+    #[test]
+    fn bogus_comment_excludes_bang_but_keeps_question_mark() {
+        // `<!xyz>` → bogus comment without the `!` introducer (spec: don't consume).
+        assert_eq!(tags("<!xyz>")[0], Token::Comment("xyz".into()));
+        // `<?pi>` → bogus comment that *reconsumes* the `?` (spec-correct).
+        assert_eq!(tags("<?pi>")[0], Token::Comment("?pi".into()));
     }
 
     #[test]
