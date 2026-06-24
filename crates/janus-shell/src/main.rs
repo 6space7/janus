@@ -103,6 +103,19 @@ impl App {
             }
             Err(e) => {
                 eprintln!("janus: loading {url}: {e}");
+                // Show the failure in-window instead of leaving a blank page.
+                let safe = |s: &str| s.replace('<', "(").replace('>', ")");
+                let html = format!(
+                    "<html><body><h2>Couldn't load this page</h2>\
+                     <p>{}</p><p style=\"color:#b00\">{}</p></body></html>",
+                    safe(url),
+                    safe(&e),
+                );
+                if let Some(page) = janus_host::render_html(&html, None, self.css_width()) {
+                    self.pixmap = janus_paint::paint(&page.layout);
+                    self.page = Some(page);
+                    self.scroll = 0.0;
+                }
                 false
             }
         }

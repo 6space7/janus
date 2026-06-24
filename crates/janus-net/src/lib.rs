@@ -13,8 +13,9 @@ mod cookie;
 mod http;
 
 use std::io::{ErrorKind, Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
+use std::time::Duration;
 
 use janus_bytes::Url;
 
@@ -168,8 +169,21 @@ fn fetch_once(url: &Url, cookie: Option<&str>) -> Result<Vec<u8>, NetError> {
     }
 }
 
+/// Connect with a bounded connect timeout and per-read/write timeouts so a slow
+/// or dead server can never hang the caller (e.g. the browser window) forever.
+fn connect(host: &str, port: u16) -> Result<TcpStream, NetError> {
+    let addr = (host, port)
+        .to_socket_addrs()?
+        .next()
+        .ok_or(NetError::BadUrl)?;
+    let sock = TcpStream::connect_timeout(&addr, Duration::from_secs(15))?;
+    sock.set_read_timeout(Some(Duration::from_secs(30)))?;
+    sock.set_write_timeout(Some(Duration::from_secs(15)))?;
+    Ok(sock)
+}
+
 fn fetch_plain(host: &str, port: u16, request: &[u8]) -> Result<Vec<u8>, NetError> {
-    let mut sock = TcpStream::connect((host, port))?;
+    let mut sock = connect(host, port)?;
     sock.write_all(request)?;
     let mut buf = Vec::new();
     sock.read_to_end(&mut buf)?;
@@ -191,7 +205,7 @@ fn fetch_tls(host: &str, port: u16, request: &[u8]) -> Result<Vec<u8>, NetError>
         rustls::pki_types::ServerName::try_from(host.to_string()).map_err(|_| NetError::BadUrl)?;
     let mut conn = rustls::ClientConnection::new(Arc::new(config), server_name)
         .map_err(|e| NetError::Tls(e.to_string()))?;
-    let mut sock = TcpStream::connect((host, port))?;
+    let mut sock = connect(host, port)?;
     let mut tls = rustls::Stream::new(&mut conn, &mut sock);
 
     tls.write_all(request)?;
